@@ -8,6 +8,9 @@ from os import listdir
 from os.path import join
 from data.util import *
 from torchvision import transforms as t
+from data.options import option
+
+opt = option().parse_args()
 
     
 class LOLDatasetFromFolder(data.Dataset):
@@ -29,7 +32,8 @@ class LOLDatasetFromFolder(data.Dataset):
         im2 = load_img(data_filenames2[index])
         _, file1 = os.path.split(data_filenames[index])
         _, file2 = os.path.split(data_filenames2[index])
-        seed = random.randint(1, 1000000)
+        # seed = random.randint(1, 1000000)
+        seed = opt.seed
         seed = np.random.randint(seed) # make a seed with numpy generator 
         if self.transform:
             random.seed(seed) # apply this seed to img tranfsorms
@@ -61,8 +65,9 @@ class LOLv2DatasetFromFolder(data.Dataset):
         im2 = load_img(data_filenames2[index])
         _, file1 = os.path.split(data_filenames[index])
         _, file2 = os.path.split(data_filenames2[index])
-        seed = random.randint(1, 1000000)
-        seed = np.random.randint(seed) # make a seed with numpy generator 
+        # seed = random.randint(1, 1000000)
+        seed = opt.seed
+        seed = np.random.randint(seed) # make a seed with numpy generator
         if self.transform:
             random.seed(seed) # apply this seed to img tranforms
             torch.manual_seed(seed) # needed for torchvision 0.7
@@ -96,7 +101,8 @@ class LOLv2SynDatasetFromFolder(data.Dataset):
         im2 = load_img(data_filenames2[index])
         _, file1 = os.path.split(data_filenames[index])
         _, file2 = os.path.split(data_filenames2[index])
-        seed = random.randint(1, 1000000)
+        # seed = random.randint(1, 1000000)
+        seed = opt.seed
         seed = np.random.randint(seed) # make a seed with numpy generator 
         if self.transform:
             random.seed(seed) # apply this seed to img tranfsorms
