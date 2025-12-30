@@ -61,10 +61,15 @@ def option():
     parser.add_argument('--val_folder', default='./results/', help='Location to save validation datasets')
 
     # loss weights
+    # parser.add_argument('--HVI_weight', type=float, default=1.0)
+    # parser.add_argument('--L1_weight', type=float, default=1.0)
+    # parser.add_argument('--D_weight',  type=float, default=0.5)
+    # parser.add_argument('--E_weight',  type=float, default=50.0)
+    # parser.add_argument('--P_weight',  type=float, default=1e-2)
     parser.add_argument('--HVI_weight', type=float, default=1.0)
-    parser.add_argument('--L1_weight', type=float, default=1.0)
-    parser.add_argument('--D_weight',  type=float, default=0.5)
-    parser.add_argument('--E_weight',  type=float, default=50.0)
+    parser.add_argument('--L1_weight', type=float, default=0)
+    parser.add_argument('--D_weight',  type=float, default=0)
+    parser.add_argument('--E_weight',  type=float, default=0)
     parser.add_argument('--P_weight',  type=float, default=1e-2)
     
     # use random gamma function (enhancement curve) to improve generalization
