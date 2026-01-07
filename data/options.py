@@ -21,6 +21,14 @@ def option():
     parser.add_argument('--shuffle', type=_str2bool, default=True)
     parser.add_argument('--threads', type=int, default=16, help='number of threads for dataloader to use')
     parser.add_argument('--seed', type=int, default=42, help='seed for random functions')
+
+    # prior settings
+    parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
+    parser.add_argument('--prior_label_dir', type=str, default=None, help='label folder; defaults to <train_root>/label if not set')
+    parser.add_argument('--prior_mode', type=str, default='gate', choices=['gate', 'film', 'attn'], help='how to inject region prior into CIDNet')
+
+
+
     # choose a scheduler
     parser.add_argument('--cos_restart_cyclic', type=_str2bool, default=False)
     parser.add_argument('--cos_restart', type=_str2bool, default=True)
@@ -61,16 +69,16 @@ def option():
     parser.add_argument('--val_folder', default='./results/', help='Location to save validation datasets')
 
     # loss weights
-    # parser.add_argument('--HVI_weight', type=float, default=1.0)
-    # parser.add_argument('--L1_weight', type=float, default=1.0)
-    # parser.add_argument('--D_weight',  type=float, default=0.5)
-    # parser.add_argument('--E_weight',  type=float, default=50.0)
-    # parser.add_argument('--P_weight',  type=float, default=1e-2)
     parser.add_argument('--HVI_weight', type=float, default=1.0)
-    parser.add_argument('--L1_weight', type=float, default=0)
-    parser.add_argument('--D_weight',  type=float, default=0)
-    parser.add_argument('--E_weight',  type=float, default=0)
+    parser.add_argument('--L1_weight', type=float, default=1.0)
+    parser.add_argument('--D_weight',  type=float, default=0.5)
+    parser.add_argument('--E_weight',  type=float, default=50.0)
     parser.add_argument('--P_weight',  type=float, default=1e-2)
+    # parser.add_argument('--HVI_weight', type=float, default=1.0)
+    # parser.add_argument('--L1_weight', type=float, default=0)
+    # parser.add_argument('--D_weight',  type=float, default=0)
+    # parser.add_argument('--E_weight',  type=float, default=0)
+    # parser.add_argument('--P_weight',  type=float, default=1e-2)
     
     # use random gamma function (enhancement curve) to improve generalization
     parser.add_argument('--gamma', type=_str2bool, default=False)

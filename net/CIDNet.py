@@ -3,6 +3,7 @@ import torch.nn as nn
 from net.HVI_transform import RGB_HVI
 from net.transformer_utils import *
 from net.LCA import *
+from net.prior_modules import SoftRegionMask, RegionPooling, RegionPolicyMLP, RegionFiLM, RegionCrossAttention, BoundaryMap, StructureGate
 from huggingface_hub import PyTorchModelHubMixin
 
 
@@ -85,7 +86,23 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
 
         self.trans = RGB_HVI()
 
-    def forward(self, x):
+        # Region prior modules (used when index_map is provided)
+        self.soft_mask = SoftRegionMask()
+        self.region_pool = RegionPooling()
+        # stage-1 injection at i_enc2 (channels=ch2)
+        self.region_policy = RegionPolicyMLP(ch2)
+        self.region_film = RegionFiLM()
+        self.region_attn = RegionCrossAttention(ch2, init_alpha=-2.197225)
+        self.boundary_map = BoundaryMap()
+        self.structure_gate = StructureGate(ch2)
+
+        # stage-2 injection at i_enc3 (deeper, channels=ch4)
+        self.region_policy2 = RegionPolicyMLP(ch4)
+        self.region_film2 = RegionFiLM()
+        self.region_attn2 = RegionCrossAttention(ch4, init_alpha=-2.197225)
+        self.structure_gate2 = StructureGate(ch4)
+
+    def forward(self, x, index_map=None, prior_mode: str = 'gate'):
         dtypes = x.dtype
         hvi = self.trans.HVIT(x)  # [B, 3, H, W] -> [H,V,I]
         i = hvi[:, 2, :, :].unsqueeze(1).to(dtypes)  # 抽出 I 通道给 I 分支
@@ -101,6 +118,21 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         hv_jump0 = hv_0
 
         i_enc2 = self.I_LCA1(i_enc1, hv_1)
+        # Apply region prior after first cross-branch interaction (safer than pre-LCA)
+        if index_map is not None:
+            target_hw = i_enc2.shape[-2:]
+            if prior_mode == 'film':
+                S = self.soft_mask(index_map, target_hw=target_hw)
+                V = self.region_pool(i_enc2, S)
+                gamma, beta = self.region_policy(V)
+                i_enc2 = self.region_film(i_enc2, S, gamma, beta)
+            elif prior_mode == 'attn':
+                S = self.soft_mask(index_map, target_hw=target_hw)
+                V = self.region_pool(i_enc2, S)
+                i_enc2 = self.region_attn(i_enc2, S, V)
+            else:
+                A = self.boundary_map(index_map, target_hw=target_hw)
+                i_enc2 = self.structure_gate(i_enc2, A)
         hv_2 = self.HV_LCA1(hv_1, i_enc1)
         v_jump1 = i_enc2
         hv_jump1 = hv_2
@@ -117,6 +149,22 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         # 原来仓库代码：
         i_enc3 = self.IE_block3(i_enc2)
         hv_3 = self.HVE_block3(hv_2)
+
+        # Apply a second region prior at a deeper stage (less texture-sensitive, more semantic)
+        if index_map is not None:
+            target_hw = i_enc3.shape[-2:]
+            if prior_mode == 'film':
+                S = self.soft_mask(index_map, target_hw=target_hw)
+                V = self.region_pool(i_enc3, S)
+                gamma, beta = self.region_policy2(V)
+                i_enc3 = self.region_film2(i_enc3, S, gamma, beta)
+            elif prior_mode == 'attn':
+                S = self.soft_mask(index_map, target_hw=target_hw)
+                V = self.region_pool(i_enc3, S)
+                i_enc3 = self.region_attn2(i_enc3, S, V)
+            else:
+                A = self.boundary_map(index_map, target_hw=target_hw)
+                i_enc3 = self.structure_gate2(i_enc3, A)
 
         i_enc4 = self.I_LCA3(i_enc3, hv_3)
         hv_4 = self.HV_LCA3(hv_3, i_enc3)
@@ -151,6 +199,3 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
     def HVIT(self, x):
         hvi = self.trans.HVIT(x)
         return hvi
-
-
-

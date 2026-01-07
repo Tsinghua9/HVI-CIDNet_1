@@ -18,6 +18,103 @@ from datetime import datetime
 
 opt = option().parse_args()
 
+if (not opt.use_region_prior) and (opt.prior_label_dir is not None or opt.prior_mode != "gate"):
+    print("[warn] prior_mode/prior_label_dir is set but --use_region_prior is False; region prior will NOT be used.")
+
+def _get_prior_alpha(model, prior_mode: str):
+    base = model.module if hasattr(model, "module") else model
+    if prior_mode == "film":
+        alpha_param = getattr(base, "region_film").alpha
+    elif prior_mode == "attn":
+        alpha_param = getattr(base, "region_attn").alpha
+    else:
+        alpha_param = getattr(base, "structure_gate").alpha
+    alpha_raw = float(alpha_param.detach().cpu().item())
+    alpha_sigmoid = float(torch.sigmoid(alpha_param.detach()).cpu().item())
+    return alpha_raw, alpha_sigmoid
+
+def _get_prior_alpha2(model, prior_mode: str):
+    base = model.module if hasattr(model, "module") else model
+    if prior_mode == "film":
+        alpha_param = getattr(base, "region_film2").alpha
+    elif prior_mode == "attn":
+        alpha_param = getattr(base, "region_attn2").alpha
+    else:
+        alpha_param = getattr(base, "structure_gate2").alpha
+    alpha_raw = float(alpha_param.detach().cpu().item())
+    alpha_sigmoid = float(torch.sigmoid(alpha_param.detach()).cpu().item())
+    return alpha_raw, alpha_sigmoid
+
+def _get_prior_policy_stats(model):
+    base = model.module if hasattr(model, "module") else model
+    policy = getattr(base, "region_policy", None)
+    if policy is None:
+        return None
+    stats = {}
+    for key in ["last_gamma_mean", "last_gamma_std", "last_beta_mean", "last_beta_std"]:
+        if hasattr(policy, key):
+            stats[key] = getattr(policy, key)
+    return stats or None
+
+def _get_prior_film_stats(model):
+    base = model.module if hasattr(model, "module") else model
+    film = getattr(base, "region_film", None)
+    if film is None:
+        return None
+    stats = {}
+    for key in [
+        "last_a",
+        "last_gamma_dev_mean",
+        "last_gamma_dev_std",
+        "last_beta_used_mean",
+        "last_beta_used_std",
+        "last_delta_ratio",
+    ]:
+        if hasattr(film, key):
+            stats[key] = getattr(film, key)
+    return stats or None
+
+def _get_prior_film2_stats(model):
+    base = model.module if hasattr(model, "module") else model
+    film = getattr(base, "region_film2", None)
+    if film is None:
+        return None
+    stats = {}
+    for key in ["last_a", "last_delta_ratio"]:
+        if hasattr(film, key):
+            stats[key] = getattr(film, key)
+    return stats or None
+
+def _get_prior_attn_stats(model):
+    base = model.module if hasattr(model, "module") else model
+    attn = getattr(base, "region_attn", None)
+    if attn is None:
+        return None
+    stats = {}
+    for key in ["last_a", "last_delta_ratio", "mask_bias_scale"]:
+        if hasattr(attn, key):
+            val = getattr(attn, key)
+            if torch.is_tensor(val):
+                stats[key] = float(val.detach().cpu().item())
+            else:
+                stats[key] = val
+    return stats or None
+
+def _get_prior_attn2_stats(model):
+    base = model.module if hasattr(model, "module") else model
+    attn = getattr(base, "region_attn2", None)
+    if attn is None:
+        return None
+    stats = {}
+    for key in ["last_a", "last_delta_ratio", "mask_bias_scale"]:
+        if hasattr(attn, key):
+            val = getattr(attn, key)
+            if torch.is_tensor(val):
+                stats[key] = float(val.detach().cpu().item())
+            else:
+                stats[key] = val
+    return stats or None
+
 def seed_torch():
     # seed = random.randint(1, 1000000)
     seed = opt.seed
@@ -46,16 +143,27 @@ def train(epoch):
     iter = 0
     torch.autograd.set_detect_anomaly(opt.grad_detect)
     for batch in tqdm(training_data_loader):
-        im1, im2, path1, path2 = batch[0], batch[1], batch[2], batch[3]
+        if opt.use_region_prior:
+            im1, im2, index_map, path1, path2 = batch
+        else:
+            im1, im2, path1, path2 = batch[0], batch[1], batch[2], batch[3]
         im1 = im1.cuda()
         im2 = im2.cuda()
+        if opt.use_region_prior:
+            index_map = index_map.cuda(non_blocking=True)
         
         # use random gamma function (enhancement curve) to improve generalization
         if opt.gamma:
             gamma = random.randint(opt.start_gamma,opt.end_gamma) / 100.0
-            output_rgb = model(im1 ** gamma)  
+            if opt.use_region_prior:
+                output_rgb = model(im1 ** gamma, index_map=index_map, prior_mode=opt.prior_mode)
+            else:
+                output_rgb = model(im1 ** gamma)
         else:
-            output_rgb = model(im1)  
+            if opt.use_region_prior:
+                output_rgb = model(im1, index_map=index_map, prior_mode=opt.prior_mode)
+            else:
+                output_rgb = model(im1)
             
         gt_rgb = im2
         output_hvi = model.HVIT(output_rgb)
@@ -103,7 +211,12 @@ def checkpoint(epoch):
 def load_datasets():
     print(f'===> Loading datasets: {opt.dataset}')
     if opt.dataset == 'lol_v1':
-        train_set = get_lol_training_set(opt.data_train_lol_v1,size=opt.cropSize)
+        train_set = get_lol_training_set(
+            opt.data_train_lol_v1,
+            size=opt.cropSize,
+            label_dir=opt.prior_label_dir,
+            use_prior=opt.use_region_prior
+        )
         test_set = get_eval_set(opt.data_val_lol_v1)
         
     elif opt.dataset == 'lol_blur':
@@ -204,7 +317,7 @@ if __name__ == '__main__':
     if not os.path.exists("./results/training"):
         os.makedirs("./results/training",exist_ok=True)
 
-    now = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = f"./results/training/metrics{now}.md"
     with open(log_path, "w") as f:
         f.write(f"dataset: {opt.dataset}\n")
@@ -222,6 +335,38 @@ if __name__ == '__main__':
     for epoch in range(start_epoch+1, opt.nEpochs + start_epoch + 1):
         epoch_loss, pic_num = train(epoch)
         scheduler.step()
+        if opt.use_region_prior:
+            alpha_raw, alpha_sigmoid = _get_prior_alpha(model, opt.prior_mode)
+            alpha2_raw, alpha2_sigmoid = _get_prior_alpha2(model, opt.prior_mode)
+            msg = (f"[prior] mode={opt.prior_mode}"
+                   f" alpha1={alpha_raw:.6f} a1={alpha_sigmoid:.6f}"
+                   f" | alpha2={alpha2_raw:.6f} a2={alpha2_sigmoid:.6f}")
+            if opt.prior_mode == "film":
+                stats = _get_prior_film_stats(model)
+                if stats:
+                    msg += (f" | film1:delta_ratio={stats.get('last_delta_ratio', 0.0):.6f}"
+                            f" gamma1_used-1(std)={stats.get('last_gamma_dev_std', 0.0):.6f}"
+                            f" beta1_used(std)={stats.get('last_beta_used_std', 0.0):.6f}")
+                else:
+                    stats = _get_prior_policy_stats(model)
+                    if stats:
+                        msg += (f" | gamma_raw(mean,std)=({stats.get('last_gamma_mean', 0.0):.6f},{stats.get('last_gamma_std', 0.0):.6f})"
+                                f" beta_raw(mean,std)=({stats.get('last_beta_mean', 0.0):.6f},{stats.get('last_beta_std', 0.0):.6f})")
+                stats2 = _get_prior_film2_stats(model)
+                if stats2:
+                    msg += f" | film2:delta_ratio={stats2.get('last_delta_ratio', 0.0):.6f}"
+            elif opt.prior_mode == "attn":
+                stats = _get_prior_attn_stats(model)
+                if stats:
+                    a1 = alpha_sigmoid
+                    d1 = float(stats.get("last_delta_ratio", 0.0))
+                    msg += (f" | attn1:delta_ratio={d1:.6f} eff1={a1*d1:.6f} mb1={float(stats.get('mask_bias_scale', 0.0)):.3f}")
+                stats2 = _get_prior_attn2_stats(model)
+                if stats2:
+                    a2 = alpha2_sigmoid
+                    d2 = float(stats2.get("last_delta_ratio", 0.0))
+                    msg += f" | attn2:delta_ratio={d2:.6f} eff2={a2*d2:.6f} mb2={float(stats2.get('mask_bias_scale', 0.0)):.3f}"
+            print(msg)
         
         if epoch % opt.snapshots == 0:
             model_out_path = checkpoint(epoch) 
