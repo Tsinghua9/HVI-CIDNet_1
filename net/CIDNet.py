@@ -92,14 +92,18 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         # stage-1 injection at i_enc2 (channels=ch2)
         self.region_policy = RegionPolicyMLP(ch2)
         self.region_film = RegionFiLM()
-        self.region_attn = RegionCrossAttention(ch2, init_alpha=-2.197225)
+        self.region_attn = RegionCrossAttention(ch2, init_alpha=-2.197)
         self.boundary_map = BoundaryMap()
         self.structure_gate = StructureGate(ch2)
-
+        # a=0.10 -> alpha=-2.197
+        # a=0.05 -> alpha=-2.944
+        # a=0.03 -> alpha=-3.476
+        # a=0.02 -> alpha=-3.891
+        # a=0.01 -> alpha=-4.595
         # stage-2 injection at i_enc3 (deeper, channels=ch4)
         self.region_policy2 = RegionPolicyMLP(ch4)
         self.region_film2 = RegionFiLM()
-        self.region_attn2 = RegionCrossAttention(ch4, init_alpha=-2.197225)
+        self.region_attn2 = RegionCrossAttention(ch4, init_alpha=-2.197)
         self.structure_gate2 = StructureGate(ch4)
 
     def forward(self, x, index_map=None, prior_mode: str = 'gate'):
@@ -144,11 +148,11 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         v_jump2 = i_enc3
         hv_jump2 = hv_3
         # 按照网络结构图应该是这样：
-        # i_enc3 = self.IE_block3(i_enc3)   #之前是：i_enc3 = self.IE_block3(i_enc2)
-        # hv_3 = self.HVE_block3(hv_3)    #之前是：hv_3 = self.HVE_block3(hv_2)
+        i_enc3 = self.IE_block3(i_enc3)   #之前是：i_enc3 = self.IE_block3(i_enc2)
+        hv_3 = self.HVE_block3(hv_3)    #之前是：hv_3 = self.HVE_block3(hv_2)
         # 原来仓库代码：
-        i_enc3 = self.IE_block3(i_enc2)
-        hv_3 = self.HVE_block3(hv_2)
+        # i_enc3 = self.IE_block3(i_enc2)
+        # hv_3 = self.HVE_block3(hv_2)
 
         # Apply a second region prior at a deeper stage (less texture-sensitive, more semantic)
         if index_map is not None:
@@ -179,9 +183,9 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
 
         hv_2 = self.HVD_block2(hv_2, hv_jump1)
         # 按照网络结构图应该是这样：
-        # i_dec2 = self.ID_block2(i_dec2, v_jump1)#之前是： i_dec2 = self.ID_block2(i_dec3, v_jump1)
+        i_dec2 = self.ID_block2(i_dec2, v_jump1)#之前是： i_dec2 = self.ID_block2(i_dec3, v_jump1)
         # 原来仓库代码：
-        i_dec2 = self.ID_block2(i_dec3, v_jump1)
+        # i_dec2 = self.ID_block2(i_dec3, v_jump1)
 
         i_dec1 = self.I_LCA6(i_dec2, hv_2)
         hv_1 = self.HV_LCA6(hv_2, i_dec2)

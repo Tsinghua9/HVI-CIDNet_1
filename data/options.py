@@ -25,7 +25,19 @@ def option():
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
     parser.add_argument('--prior_label_dir', type=str, default=None, help='label folder; defaults to <train_root>/label if not set')
-    parser.add_argument('--prior_mode', type=str, default='gate', choices=['gate', 'film', 'attn'], help='how to inject region prior into CIDNet')
+    parser.add_argument('--prior_mode', type=str, default='attn', choices=['gate', 'film', 'attn'], help='how to inject region prior into CIDNet')
+
+    # region prior hyperparams (for tuning / reproducibility)
+    parser.add_argument('--max_regions', type=int, default=32,
+                        help='keep top-K regions in label (merge rest to 0)')
+    parser.add_argument('--attn_alpha1_init', type=float, default=-2.197225,
+                        help='init alpha for region_attn (a1=sigmoid(alpha1))')
+    parser.add_argument('--attn_alpha2_init', type=float, default=-2.197225,
+                        help='init alpha for region_attn2 (a2=sigmoid(alpha2))')
+    parser.add_argument('--attn_mask_bias_scale1_init', type=float, default=1.0,
+                        help='init mask_bias_scale for region_attn')
+    parser.add_argument('--attn_mask_bias_scale2_init', type=float, default=1.0,
+                        help='init mask_bias_scale for region_attn2')
 
 
 

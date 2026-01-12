@@ -144,6 +144,12 @@ def train(epoch):
     torch.autograd.set_detect_anomaly(opt.grad_detect)
     for batch in tqdm(training_data_loader):
         if opt.use_region_prior:
+            if len(batch) != 5:
+                raise RuntimeError(
+                    f"--use_region_prior True expects dataset to return 5 items "
+                    f"(im1, im2, index_map, path1, path2), got {len(batch)}. "
+                    f"Dataset={opt.dataset}, prior_label_dir={opt.prior_label_dir}, prior_mode={opt.prior_mode}"
+                )
             im1, im2, index_map, path1, path2 = batch
         else:
             im1, im2, path1, path2 = batch[0], batch[1], batch[2], batch[3]
@@ -215,7 +221,8 @@ def load_datasets():
             opt.data_train_lol_v1,
             size=opt.cropSize,
             label_dir=opt.prior_label_dir,
-            use_prior=opt.use_region_prior
+            use_prior=opt.use_region_prior,
+            max_regions=opt.max_regions,
         )
         test_set = get_eval_set(opt.data_val_lol_v1)
         
@@ -224,11 +231,23 @@ def load_datasets():
         test_set = get_eval_set(opt.data_val_lol_blur)
 
     elif opt.dataset == 'lolv2_real':
-        train_set = get_lol_v2_training_set(opt.data_train_lolv2_real,size=opt.cropSize)
+        train_set = get_lol_v2_training_set(
+            opt.data_train_lolv2_real,
+            size=opt.cropSize,
+            label_dir=opt.prior_label_dir,
+            use_prior=opt.use_region_prior,
+            max_regions=opt.max_regions,
+        )
         test_set = get_eval_set(opt.data_val_lolv2_real)
         
     elif opt.dataset == 'lolv2_syn':
-        train_set = get_lol_v2_syn_training_set(opt.data_train_lolv2_syn,size=opt.cropSize)
+        train_set = get_lol_v2_syn_training_set(
+            opt.data_train_lolv2_syn,
+            size=opt.cropSize,
+            label_dir=opt.prior_label_dir,
+            use_prior=opt.use_region_prior,
+            max_regions=opt.max_regions,
+        )
         test_set = get_eval_set(opt.data_val_lolv2_syn)
     
     elif opt.dataset == 'SID':
@@ -299,6 +318,15 @@ if __name__ == '__main__':
     train_init()
     training_data_loader, testing_data_loader = load_datasets()
     model = build_model()
+    # Apply attn init params from options for reproducible tuning (only for fresh training).
+    base = model.module if hasattr(model, "module") else model
+    if opt.use_region_prior and opt.prior_mode == "attn" and opt.start_epoch == 0:
+        if hasattr(base, "region_attn"):
+            base.region_attn.alpha.data.fill_(float(opt.attn_alpha1_init))
+            base.region_attn.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale1_init))
+        if hasattr(base, "region_attn2"):
+            base.region_attn2.alpha.data.fill_(float(opt.attn_alpha2_init))
+            base.region_attn2.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale2_init))
     optimizer,scheduler = make_scheduler()
     L1_loss,P_loss,E_loss,D_loss = init_loss()
     
@@ -318,7 +346,8 @@ if __name__ == '__main__':
         os.makedirs("./results/training",exist_ok=True)
 
     now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = f"./results/training/metrics{now}.md"
+    dataset_tag = str(opt.dataset).replace("/", "_").replace("\\", "_").replace(" ", "_")
+    log_path = f"./results/training/metrics_{dataset_tag}_{now}.md"
     with open(log_path, "w") as f:
         f.write(f"dataset: {opt.dataset}\n")
         f.write(f"lr: {opt.lr}\n")
@@ -329,8 +358,19 @@ if __name__ == '__main__':
         f.write(f"D_weight: {opt.D_weight}\n")
         f.write(f"E_weight: {opt.E_weight}\n")
         f.write(f"P_weight: {opt.P_weight}\n")
-        f.write("| Epochs | PSNR | SSIM | LPIPS |\n")
-        f.write("|----------------------|----------------------|----------------------|----------------------|\n")
+        f.write(f"use_region_prior: {opt.use_region_prior}\n")
+        f.write(f"prior_mode: {opt.prior_mode}\n")
+        f.write(f"prior_label_dir: {opt.prior_label_dir}\n")
+        f.write(f"max_regions: {opt.max_regions}\n")
+        f.write(f"attn_alpha1_init: {opt.attn_alpha1_init}\n")
+        f.write(f"attn_alpha2_init: {opt.attn_alpha2_init}\n")
+        f.write(f"attn_mask_bias_scale1_init: {opt.attn_mask_bias_scale1_init}\n")
+        f.write(f"attn_mask_bias_scale2_init: {opt.attn_mask_bias_scale2_init}\n")
+        # f.write("| Epochs | PSNR | SSIM | LPIPS |\n")
+        # f.write("|----------------------|----------------------|----------------------|----------------------|\n")
+        f.write("| Epoch | PSNR | SSIM | LPIPS | mode | alpha1 | a1 | d1 | eff1 | mb1 | alpha2 | a2 | d2 | eff2 | mb2 |\n")
+        f.write("|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+
 
     for epoch in range(start_epoch+1, opt.nEpochs + start_epoch + 1):
         epoch_loss, pic_num = train(epoch)
@@ -423,7 +463,41 @@ if __name__ == '__main__':
             print(ssim)
             print(lpips)
 
+            # with open(log_path, "a") as f:
+            #     f.write(f"| {epoch} | {avg_psnr:.4f} | {avg_ssim:.4f} | {avg_lpips:.4f} |\n")
+            mode_s = "-" if not opt.use_region_prior else opt.prior_mode
+
+            alpha1_s = a1_s = d1_s = eff1_s = mb1_s = "-"
+            alpha2_s = a2_s = d2_s = eff2_s = mb2_s = "-"
+
+            if opt.use_region_prior and opt.prior_mode == "attn":
+                stats1 = _get_prior_attn_stats(model) or {}
+                stats2 = _get_prior_attn2_stats(model) or {}
+                alpha_raw, alpha_sigmoid = _get_prior_alpha(model, opt.prior_mode)
+                alpha2_raw, alpha2_sigmoid = _get_prior_alpha2(model, opt.prior_mode)
+
+                d1 = float(stats1.get("last_delta_ratio", 0.0) or 0.0)
+                d2 = float(stats2.get("last_delta_ratio", 0.0) or 0.0)
+                mb1 = float(stats1.get("mask_bias_scale", 0.0) or 0.0)
+                mb2 = float(stats2.get("mask_bias_scale", 0.0) or 0.0)
+
+                alpha1_s = f"{alpha_raw:.6f}"
+                a1_s     = f"{alpha_sigmoid:.6f}"
+                d1_s     = f"{d1:.6f}"
+                eff1_s   = f"{(alpha_sigmoid*d1):.6f}"
+                mb1_s    = f"{mb1:.3f}"
+
+                alpha2_s = f"{alpha2_raw:.6f}"
+                a2_s     = f"{alpha2_sigmoid:.6f}"
+                d2_s     = f"{d2:.6f}"
+                eff2_s   = f"{(alpha2_sigmoid*d2):.6f}"
+                mb2_s    = f"{mb2:.3f}"
+
             with open(log_path, "a") as f:
-                f.write(f"| {epoch} | {avg_psnr:.4f} | {avg_ssim:.4f} | {avg_lpips:.4f} |\n")
+                f.write(
+                    f"| {epoch} | {avg_psnr:.4f} | {avg_ssim:.4f} | {avg_lpips:.4f} | {mode_s} | "
+                    f"{alpha1_s} | {a1_s} | {d1_s} | {eff1_s} | {mb1_s} | "
+                    f"{alpha2_s} | {a2_s} | {d2_s} | {eff2_s} | {mb2_s} |\n"
+                )
 
         torch.cuda.empty_cache()

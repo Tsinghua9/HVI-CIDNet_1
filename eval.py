@@ -96,7 +96,7 @@ if __name__ == '__main__':
         if ep.perc:
             weight_path = './weights/LOLv1/w_perc.pth'
         else:
-            weight_path = './weights/LOLv1/wo_perc.pth'
+            weight_path = '/home/zqh/code/HVI-CIDNet_1/weights/LOLv1/attn/epoch_640.pth'
         
             
     elif ep.lol_v2_real:

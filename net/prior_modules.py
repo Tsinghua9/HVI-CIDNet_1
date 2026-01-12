@@ -156,7 +156,7 @@ class RegionCrossAttention(nn.Module):
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
 
-        self.mask_bias_scale = nn.Parameter(torch.tensor(1.0))
+        self.mask_bias_scale = nn.Parameter(torch.tensor(0.5))
         self.area_gate_power = float(area_gate_power)
         self.alpha = nn.Parameter(torch.tensor(float(init_alpha)))
         self.eps = float(eps)
@@ -175,10 +175,10 @@ class RegionCrossAttention(nn.Module):
         # Optional: down-weight small regions (noisy tokens)
         v_tokens = region_vec
         if self.area_gate_power > 0.0:
-            area = mask.sum(dim=(2, 3))  # (B,K)
-            p = area / float(h * w)
+            area = mask.sum(dim=(2, 3))  # (B,K) 每个区域“有多少像素”(软面积)
+            p = area / float(h * w)    # 面积比例
             denom = p.max(dim=1, keepdim=True).values.clamp_min(1e-6)
-            g = (p / denom).clamp_min(0.0).pow(self.area_gate_power)  # (B,K) in [0,1]
+            g = (p / denom).clamp_min(0.0).pow(self.area_gate_power)  # (B,K) in [0,1] 最大区域 g=1，小区域 g<1
             v_tokens = v_tokens * g.unsqueeze(-1)
 
         q = self.q(feat)  # (B,C,H,W)
