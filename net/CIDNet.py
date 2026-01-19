@@ -93,6 +93,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         self.region_policy = RegionPolicyMLP(ch2)
         self.region_film = RegionFiLM()
         self.region_attn = RegionCrossAttention(ch2, init_alpha=-2.197)
+        # Clamp mask routing strength (defaults; can be overridden by train.py CLI flags).
+        self.region_attn.mask_bias_scale_max = 1.0
         self.boundary_map = BoundaryMap()
         self.structure_gate = StructureGate(ch2)
         # a=0.10 -> alpha=-2.197
@@ -104,6 +106,9 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         self.region_policy2 = RegionPolicyMLP(ch4)
         self.region_film2 = RegionFiLM()
         self.region_attn2 = RegionCrossAttention(ch4, init_alpha=-2.197)
+        # Deeper stage is more prone to late-training over-injection; keep routing prior milder by default.
+        # (Can be overridden by train.py CLI flags.)
+        self.region_attn2.mask_bias_scale_max = 0.65
         self.structure_gate2 = StructureGate(ch4)
 
     def forward(self, x, index_map=None, prior_mode: str = 'gate'):

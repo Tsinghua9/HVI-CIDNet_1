@@ -320,13 +320,21 @@ if __name__ == '__main__':
     model = build_model()
     # Apply attn init params from options for reproducible tuning (only for fresh training).
     base = model.module if hasattr(model, "module") else model
-    if opt.use_region_prior and opt.prior_mode == "attn" and opt.start_epoch == 0:
+    if opt.use_region_prior and opt.prior_mode == "attn":
+        # Always apply mb clamp settings (these are plain attributes, not saved in state_dict).
         if hasattr(base, "region_attn"):
-            base.region_attn.alpha.data.fill_(float(opt.attn_alpha1_init))
-            base.region_attn.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale1_init))
+            base.region_attn.mask_bias_scale_max = None if float(opt.attn_mask_bias_scale1_max) < 0 else float(opt.attn_mask_bias_scale1_max)
         if hasattr(base, "region_attn2"):
-            base.region_attn2.alpha.data.fill_(float(opt.attn_alpha2_init))
-            base.region_attn2.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale2_init))
+            base.region_attn2.mask_bias_scale_max = None if float(opt.attn_mask_bias_scale2_max) < 0 else float(opt.attn_mask_bias_scale2_max)
+
+        # Apply init params only for fresh training (avoid overwriting a resumed checkpoint).
+        if opt.start_epoch == 0:
+            if hasattr(base, "region_attn"):
+                base.region_attn.alpha.data.fill_(float(opt.attn_alpha1_init))
+                base.region_attn.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale1_init))
+            if hasattr(base, "region_attn2"):
+                base.region_attn2.alpha.data.fill_(float(opt.attn_alpha2_init))
+                base.region_attn2.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale2_init))
     optimizer,scheduler = make_scheduler()
     L1_loss,P_loss,E_loss,D_loss = init_loss()
     
@@ -366,6 +374,8 @@ if __name__ == '__main__':
         f.write(f"attn_alpha2_init: {opt.attn_alpha2_init}\n")
         f.write(f"attn_mask_bias_scale1_init: {opt.attn_mask_bias_scale1_init}\n")
         f.write(f"attn_mask_bias_scale2_init: {opt.attn_mask_bias_scale2_init}\n")
+        f.write(f"attn_mask_bias_scale1_max: {opt.attn_mask_bias_scale1_max}\n")
+        f.write(f"attn_mask_bias_scale2_max: {opt.attn_mask_bias_scale2_max}\n")
         # f.write("| Epochs | PSNR | SSIM | LPIPS |\n")
         # f.write("|----------------------|----------------------|----------------------|----------------------|\n")
         f.write("| Epoch | PSNR | SSIM | LPIPS | mode | alpha1 | a1 | d1 | eff1 | mb1 | alpha2 | a2 | d2 | eff2 | mb2 |\n")

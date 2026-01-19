@@ -38,6 +38,10 @@ def option():
                         help='init mask_bias_scale for region_attn')
     parser.add_argument('--attn_mask_bias_scale2_init', type=float, default=1.0,
                         help='init mask_bias_scale for region_attn2')
+    parser.add_argument('--attn_mask_bias_scale1_max', type=float, default=1.0,
+                        help='max clamp for region_attn.mask_bias_scale; set <0 to disable clamp')
+    parser.add_argument('--attn_mask_bias_scale2_max', type=float, default=0.65,
+                        help='max clamp for region_attn2.mask_bias_scale; set <0 to disable clamp')
 
 
 

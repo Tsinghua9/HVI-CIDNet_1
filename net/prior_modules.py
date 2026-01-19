@@ -157,6 +157,10 @@ class RegionCrossAttention(nn.Module):
         nn.init.zeros_(self.proj.bias)
 
         self.mask_bias_scale = nn.Parameter(torch.tensor(0.5))
+        # Optional hard limits for stability (set by CIDNet for stage-1/stage-2).
+        # When None, no clamping is applied.
+        self.mask_bias_scale_min = 0.0
+        self.mask_bias_scale_max = None
         self.area_gate_power = float(area_gate_power)
         self.alpha = nn.Parameter(torch.tensor(float(init_alpha)))
         self.eps = float(eps)
@@ -189,6 +193,13 @@ class RegionCrossAttention(nn.Module):
         # Attention over K regions per pixel: (B,HW,K)
         attn_logits = torch.einsum("bmc,bkc->bmk", q, k_tok) / (c ** 0.5)
         mask_flat = mask.flatten(2).transpose(1, 2)  # (B,HW,K)
+        # Keep routing prior bounded; prevents late-training "hard routing" collapse on noisy masks.
+        if self.mask_bias_scale_max is not None:
+            with torch.no_grad():
+                self.mask_bias_scale.clamp_(min=float(self.mask_bias_scale_min), max=float(self.mask_bias_scale_max))
+        else:
+            with torch.no_grad():
+                self.mask_bias_scale.clamp_(min=float(self.mask_bias_scale_min))
         attn_logits = attn_logits + self.mask_bias_scale * torch.log(mask_flat + self.eps)
         attn = torch.softmax(attn_logits, dim=-1)
 
@@ -202,6 +213,7 @@ class RegionCrossAttention(nn.Module):
         if self.training:
             with torch.no_grad():
                 self.last_a = float(a.detach().cpu().item())
+                self.last_mask_bias_scale = float(self.mask_bias_scale.detach().cpu().item())
                 delta_f = delta.float()
                 base_f = feat.float()
                 delta_rms = torch.sqrt(torch.mean(delta_f * delta_f) + 1e-12)
