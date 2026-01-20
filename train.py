@@ -274,7 +274,7 @@ def load_datasets():
 
 def build_model():
     print('===> Building model ')
-    model = CIDNet().cuda()
+    model = CIDNet(use_wtconv=opt.use_wtconv).cuda()
     if opt.start_epoch > 0:
         pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
         model.load_state_dict(torch.load(pth, map_location=lambda storage, loc: storage))
@@ -368,6 +368,7 @@ if __name__ == '__main__':
         f.write(f"P_weight: {opt.P_weight}\n")
         f.write(f"use_region_prior: {opt.use_region_prior}\n")
         f.write(f"prior_mode: {opt.prior_mode}\n")
+        f.write(f"use_wtconv: {opt.use_wtconv}\n")
         f.write(f"prior_label_dir: {opt.prior_label_dir}\n")
         f.write(f"max_regions: {opt.max_regions}\n")
         f.write(f"attn_alpha1_init: {opt.attn_alpha1_init}\n")

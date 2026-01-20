@@ -21,6 +21,7 @@ def option():
     parser.add_argument('--shuffle', type=_str2bool, default=True)
     parser.add_argument('--threads', type=int, default=16, help='number of threads for dataloader to use')
     parser.add_argument('--seed', type=int, default=42, help='seed for random functions')
+    parser.add_argument('--use_wtconv', type=_str2bool, default=True, help='use WTConv stems for HV/I branches')
 
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
