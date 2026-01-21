@@ -3,7 +3,7 @@ import torch.nn as nn
 from net.HVI_transform import RGB_HVI
 from net.transformer_utils import *
 from net.LCA import *
-from net.wtconv import WTConv2d
+from net.wtconv import hv_fe, i_fe
 from net.prior_modules import SoftRegionMask, RegionPooling, RegionPolicyMLP, RegionFiLM, RegionCrossAttention, BoundaryMap, StructureGate
 from huggingface_hub import PyTorchModelHubMixin
 
@@ -13,9 +13,9 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  channels=[36, 36, 72, 144],  # 每个阶段的通道数（从浅到深）
                  heads=[1, 2, 4, 8],  # 每个阶段的多头注意力头数
                  norm=False,  # 是否使用 LayerNorm
-                 use_wtconv=True):
+                 use_wtconv_i=True,
+                 use_dwconv_hv=False):
         super(CIDNet, self).__init__()
-        self.use_wtconv = use_wtconv
 
         # 解包通道数和 head 数量，方便后面使用
         [ch1, ch2, ch3, ch4] = channels
@@ -39,24 +39,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         #     nn.Conv2d(1, ch1, 3, stride=1, padding=0, bias=False),
         # )
 
-        if use_wtconv:
-            self.HVE_block0 = nn.Sequential(
-                nn.Conv2d(3, ch1, 1, stride=1, padding=0, bias=False),
-                WTConv2d(ch1, ch1, kernel_size=5, wt_levels=1, wt_type="db1"),
-            )
-            self.IE_block0 = nn.Sequential(
-                nn.Conv2d(1, ch1, 1, stride=1, padding=0, bias=False),
-                WTConv2d(ch1, ch1, kernel_size=5, wt_levels=1, wt_type="db1"),
-            )
-        else:
-            self.HVE_block0 = nn.Sequential(
-                nn.ReplicationPad2d(1),
-                nn.Conv2d(3, ch1, 3, stride=1, padding=0, bias=False),
-            )
-            self.IE_block0 = nn.Sequential(
-                nn.ReplicationPad2d(1),
-                nn.Conv2d(1, ch1, 3, stride=1, padding=0, bias=False),
-            )
+        self.HVE_block0 = hv_fe(ch1, use_dwconv_hv)
+        self.IE_block0 = i_fe(ch1, use_wtconv_i)
         # 接下来是下采样模块（NormDownsample 定义在 transformer_utils.py）
         # 每经过一个 Downsample，空间尺寸减半、通道数增加
         # eg: (B, 36, 384, 384) → (B, 36, 192, 192)

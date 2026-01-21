@@ -177,3 +177,53 @@ class WTConv2d(nn.Module):
             x = self.do_stride(x)
 
         return x
+
+
+class Depth_conv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super(Depth_conv, self).__init__()
+        self.depth_conv = nn.Conv2d(
+            in_channels=in_ch,
+            out_channels=in_ch,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+            padding=1,
+            groups=in_ch,
+        )
+        self.point_conv = nn.Conv2d(
+            in_channels=in_ch,
+            out_channels=out_ch,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+            padding=0,
+            groups=1,
+        )
+
+    def forward(self, input):
+        out = self.depth_conv(input)
+        out = self.point_conv(out)
+        return out
+
+
+def hv_fe(ch1, use_dwconv_hv):
+    if use_dwconv_hv:
+        return nn.Sequential(
+            nn.ReplicationPad2d(1),
+            Depth_conv(3, ch1),
+        )
+    return nn.Sequential(
+        nn.ReplicationPad2d(1),
+        nn.Conv2d(3, ch1, 3, stride=1, padding=0, bias=False),
+    )
+
+
+def i_fe(ch1, use_wtconv_i):
+    if use_wtconv_i:
+        return nn.Sequential(
+            nn.Conv2d(1, ch1, 1, stride=1, padding=0, bias=False),
+            WTConv2d(ch1, ch1, kernel_size=5, wt_levels=1, wt_type="db1"),
+        )
+    return nn.Sequential(
+        nn.ReplicationPad2d(1),
+        nn.Conv2d(1, ch1, 3, stride=1, padding=0, bias=False),
+    )
