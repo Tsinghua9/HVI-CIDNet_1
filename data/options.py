@@ -23,6 +23,8 @@ def option():
     parser.add_argument('--seed', type=int, default=42, help='seed for random functions')
     parser.add_argument('--use_wtconv_i', type=_str2bool, default=True, help='use WTConv stem for I branch')
     parser.add_argument('--use_dwconv_hv', type=_str2bool, default=False, help='use depthwise separable stem for HV branch')
+    parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'waveformer'],
+                        help='LCA type: cab (default) or waveformer')
 
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')

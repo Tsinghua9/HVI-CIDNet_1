@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from net.transformer_utils import *
+from net.waveformer_ops import Wave2D
 
 # Cross Attention Block
 class CAB(nn.Module):
@@ -90,4 +92,48 @@ class I_LCA(nn.Module):
     def forward(self, x, y):
         x = x + self.ffn(self.norm(x),self.norm(y))
         x = x + self.gdfn(self.norm(x)) 
+        return x
+
+
+class _WaveFormerCross(nn.Module):
+    def __init__(self, dim, embed_res=8, bias=False):
+        super().__init__()
+        self.fuse = nn.Conv2d(dim * 2, dim, kernel_size=1, bias=bias)
+        self.wpo = Wave2D(res=embed_res, dim=dim, hidden_dim=dim)
+        self.freq_embed = nn.Parameter(torch.zeros(1, dim, embed_res, embed_res))
+        nn.init.normal_(self.freq_embed, std=0.02)
+
+    def _get_freq_embed(self, h, w):
+        freq = F.interpolate(self.freq_embed, size=(h, w), mode="bilinear", align_corners=False)
+        return freq.squeeze(0).permute(1, 2, 0).contiguous()
+
+    def forward(self, x, y):
+        fuse = self.fuse(torch.cat([x, y], dim=1))
+        freq = self._get_freq_embed(fuse.shape[2], fuse.shape[3])
+        return self.wpo(fuse, freq)
+
+
+class WaveFormerHV_LCA(nn.Module):
+    def __init__(self, dim, num_heads, bias=False, embed_res=8):
+        super(WaveFormerHV_LCA, self).__init__()
+        self.gdfn = IEL(dim)
+        self.norm = LayerNorm(dim)
+        self.ffn = _WaveFormerCross(dim, embed_res=embed_res, bias=bias)
+
+    def forward(self, x, y):
+        x = x + self.ffn(self.norm(x), self.norm(y))
+        x = self.gdfn(self.norm(x))
+        return x
+
+
+class WaveFormerI_LCA(nn.Module):
+    def __init__(self, dim, num_heads, bias=False, embed_res=8):
+        super(WaveFormerI_LCA, self).__init__()
+        self.norm = LayerNorm(dim)
+        self.gdfn = IEL(dim)
+        self.ffn = _WaveFormerCross(dim, embed_res=embed_res, bias=bias)
+
+    def forward(self, x, y):
+        x = x + self.ffn(self.norm(x), self.norm(y))
+        x = x + self.gdfn(self.norm(x))
         return x

@@ -14,7 +14,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  heads=[1, 2, 4, 8],  # 每个阶段的多头注意力头数
                  norm=False,  # 是否使用 LayerNorm
                  use_wtconv_i=True,
-                 use_dwconv_hv=False):
+                 use_dwconv_hv=False,
+                 lca_type='cab'):
         super(CIDNet, self).__init__()
 
         # 解包通道数和 head 数量，方便后面使用
@@ -76,19 +77,28 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             nn.Conv2d(ch1, 1, 3, stride=1, padding=0, bias=False),
         )
 
-        self.HV_LCA1 = HV_LCA(ch2, head2)
-        self.HV_LCA2 = HV_LCA(ch3, head3)
-        self.HV_LCA3 = HV_LCA(ch4, head4)
-        self.HV_LCA4 = HV_LCA(ch4, head4)
-        self.HV_LCA5 = HV_LCA(ch3, head3)
-        self.HV_LCA6 = HV_LCA(ch2, head2)
+        if lca_type == 'cab':
+            hv_lca = HV_LCA
+            i_lca = I_LCA
+        elif lca_type == 'waveformer':
+            hv_lca = WaveFormerHV_LCA
+            i_lca = WaveFormerI_LCA
+        else:
+            raise ValueError(f"Unknown lca_type: {lca_type}")
 
-        self.I_LCA1 = I_LCA(ch2, head2)
-        self.I_LCA2 = I_LCA(ch3, head3)
-        self.I_LCA3 = I_LCA(ch4, head4)
-        self.I_LCA4 = I_LCA(ch4, head4)
-        self.I_LCA5 = I_LCA(ch3, head3)
-        self.I_LCA6 = I_LCA(ch2, head2)
+        self.HV_LCA1 = hv_lca(ch2, head2)
+        self.HV_LCA2 = hv_lca(ch3, head3)
+        self.HV_LCA3 = hv_lca(ch4, head4)
+        self.HV_LCA4 = hv_lca(ch4, head4)
+        self.HV_LCA5 = hv_lca(ch3, head3)
+        self.HV_LCA6 = hv_lca(ch2, head2)
+
+        self.I_LCA1 = i_lca(ch2, head2)
+        self.I_LCA2 = i_lca(ch3, head3)
+        self.I_LCA3 = i_lca(ch4, head4)
+        self.I_LCA4 = i_lca(ch4, head4)
+        self.I_LCA5 = i_lca(ch3, head3)
+        self.I_LCA6 = i_lca(ch2, head2)
 
         self.trans = RGB_HVI()
 
