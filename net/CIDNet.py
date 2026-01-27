@@ -80,6 +80,9 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         if lca_type == 'cab':
             hv_lca = HV_LCA
             i_lca = I_LCA
+        elif lca_type == 'diem':
+            hv_lca = DIEMHV_LCA
+            i_lca = DIEMI_LCA
         elif lca_type == 'waveformer':
             hv_lca = WaveFormerHV_LCA
             i_lca = WaveFormerI_LCA

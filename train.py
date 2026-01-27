@@ -177,6 +177,9 @@ def train(epoch):
         loss_hvi = L1_loss(output_hvi, gt_hvi) + D_loss(output_hvi, gt_hvi) + E_loss(output_hvi, gt_hvi) + opt.P_weight * P_loss(output_hvi, gt_hvi)[0]
         loss_rgb = L1_loss(output_rgb, gt_rgb) + D_loss(output_rgb, gt_rgb) + E_loss(output_rgb, gt_rgb) + opt.P_weight * P_loss(output_rgb, gt_rgb)[0]
         loss = loss_rgb + opt.HVI_weight * loss_hvi
+        if opt.loss_ccl:
+            loss_ccl = CCL_loss(output_hvi, gt_hvi)
+            loss = loss + opt.ccl_weight * loss_ccl
         iter += 1
         
         if opt.grad_clip:
@@ -310,7 +313,8 @@ def init_loss():
     D_loss = SSIM(weight=D_weight).cuda()
     E_loss = EdgeLoss(loss_weight=E_weight).cuda()
     P_loss = PerceptualLoss({'conv1_2': 1, 'conv2_2': 1,'conv3_4': 1,'conv4_4': 1}, perceptual_weight = P_weight ,criterion='mse').cuda()
-    return L1_loss,P_loss,E_loss,D_loss
+    CCL_loss = CCLLoss(loss_weight=1.0).cuda()
+    return L1_loss, P_loss, E_loss, D_loss, CCL_loss
 
 if __name__ == '__main__':  
     
@@ -338,7 +342,7 @@ if __name__ == '__main__':
                 base.region_attn2.alpha.data.fill_(float(opt.attn_alpha2_init))
                 base.region_attn2.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale2_init))
     optimizer,scheduler = make_scheduler()
-    L1_loss,P_loss,E_loss,D_loss = init_loss()
+    L1_loss, P_loss, E_loss, D_loss, CCL_loss = init_loss()
     
     '''
     train
@@ -373,6 +377,8 @@ if __name__ == '__main__':
         f.write(f"use_wtconv_i: {opt.use_wtconv_i}\n")
         f.write(f"use_dwconv_hv: {opt.use_dwconv_hv}\n")
         f.write(f"lca_type: {opt.lca_type}\n")
+        f.write(f"loss_ccl: {opt.loss_ccl}\n")
+        f.write(f"ccl_weight: {opt.ccl_weight}\n")
         f.write(f"prior_label_dir: {opt.prior_label_dir}\n")
         f.write(f"max_regions: {opt.max_regions}\n")
         f.write(f"attn_alpha1_init: {opt.attn_alpha1_init}\n")

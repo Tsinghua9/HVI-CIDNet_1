@@ -190,4 +190,31 @@ class SSIM(torch.nn.Module):
         return (1. - map_ssim(img1, img2, window, self.window_size, channel, self.size_average)) * self.weight
 
 
+class CCLLoss(nn.Module):
+    def __init__(self, loss_weight=1.0):
+        super().__init__()
+        self.loss_weight = loss_weight
+
+    def forward(self, pred_hvi, gt_hvi):
+        pred_h = pred_hvi[:, 0, :, :]
+        pred_v = pred_hvi[:, 1, :, :]
+        pred_i = pred_hvi[:, 2, :, :]
+        gt_h = gt_hvi[:, 0, :, :]
+        gt_v = gt_hvi[:, 1, :, :]
+        gt_i = gt_hvi[:, 2, :, :]
+
+        abs_i = (pred_i - gt_i).abs()
+        w_h = 1.0 + abs_i.mean()
+        w_v = 1.0 + abs_i.std(unbiased=False)
+
+        l_h = F.mse_loss(pred_h, gt_h)
+        l_v = F.mse_loss(pred_v, gt_v)
+        l_i = F.mse_loss(pred_i, gt_i)
+        l_i_hv = w_h * l_h + w_v * l_v
+
+        l_hv = (pred_h * pred_v).mean() - (gt_h * gt_v).mean()
+        l_hv = l_hv * l_hv
+
+        return self.loss_weight * (l_i + l_i_hv + l_hv)
+
 

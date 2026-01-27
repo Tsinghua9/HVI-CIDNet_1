@@ -208,7 +208,6 @@ class Depth_conv(nn.Module):
 def hv_fe(ch1, use_dwconv_hv):
     if use_dwconv_hv:
         return nn.Sequential(
-            nn.ReplicationPad2d(1),
             Depth_conv(3, ch1),
         )
     return nn.Sequential(
