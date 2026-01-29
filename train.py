@@ -277,8 +277,11 @@ def load_datasets():
 
 def build_model():
     print('===> Building model ')
+    if opt.fe_type != "legacy":
+        print(f"[fe] fe_type={opt.fe_type}; ignore use_wtconv_i/use_dwconv_hv")
     model = CIDNet(use_wtconv_i=opt.use_wtconv_i,
                    use_dwconv_hv=opt.use_dwconv_hv,
+                   fe_type=opt.fe_type,
                    lca_type=opt.lca_type).cuda()
     if opt.start_epoch > 0:
         pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
@@ -376,6 +379,7 @@ if __name__ == '__main__':
         f.write(f"prior_mode: {opt.prior_mode}\n")
         f.write(f"use_wtconv_i: {opt.use_wtconv_i}\n")
         f.write(f"use_dwconv_hv: {opt.use_dwconv_hv}\n")
+        f.write(f"fe_type: {opt.fe_type}\n")
         f.write(f"lca_type: {opt.lca_type}\n")
         f.write(f"loss_ccl: {opt.loss_ccl}\n")
         f.write(f"ccl_weight: {opt.ccl_weight}\n")

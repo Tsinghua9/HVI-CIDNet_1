@@ -205,7 +205,34 @@ class Depth_conv(nn.Module):
         return out
 
 
-def hv_fe(ch1, use_dwconv_hv):
+class GateFuseStem(nn.Module):
+    def __init__(self, conv_branch, alt_branch, out_ch, gate_bias=-1.0):
+        super().__init__()
+        self.conv_branch = conv_branch
+        self.alt_branch = alt_branch
+        self.gate = nn.Conv2d(out_ch * 2, out_ch, 1, bias=True)
+        if gate_bias is not None:
+            nn.init.constant_(self.gate.bias, gate_bias)
+
+    def forward(self, x):
+        f_conv = self.conv_branch(x)
+        f_alt = self.alt_branch(x)
+        gate = torch.sigmoid(self.gate(torch.cat([f_conv, f_alt], dim=1)))
+        return f_conv * (1.0 - gate) + f_alt * gate
+
+
+def hv_fe(ch1, use_dwconv_hv, fe_type="legacy"):
+    if fe_type == "dual_gate":
+        conv_branch = nn.Sequential(
+            nn.ReplicationPad2d(1),
+            nn.Conv2d(3, ch1, 3, stride=1, padding=0, bias=False),
+        )
+        alt_branch = nn.Sequential(
+            Depth_conv(3, ch1),
+        )
+        return GateFuseStem(conv_branch, alt_branch, ch1, gate_bias=-1.0)
+    if fe_type != "legacy":
+        raise ValueError(f"Unknown fe_type: {fe_type}")
     if use_dwconv_hv:
         return nn.Sequential(
             Depth_conv(3, ch1),
@@ -216,7 +243,19 @@ def hv_fe(ch1, use_dwconv_hv):
     )
 
 
-def i_fe(ch1, use_wtconv_i):
+def i_fe(ch1, use_wtconv_i, fe_type="legacy"):
+    if fe_type == "dual_gate":
+        conv_branch = nn.Sequential(
+            nn.ReplicationPad2d(1),
+            nn.Conv2d(1, ch1, 3, stride=1, padding=0, bias=False),
+        )
+        alt_branch = nn.Sequential(
+            nn.Conv2d(1, ch1, 1, stride=1, padding=0, bias=False),
+            WTConv2d(ch1, ch1, kernel_size=5, wt_levels=1, wt_type="db1"),
+        )
+        return GateFuseStem(conv_branch, alt_branch, ch1, gate_bias=-1.0)
+    if fe_type != "legacy":
+        raise ValueError(f"Unknown fe_type: {fe_type}")
     if use_wtconv_i:
         return nn.Sequential(
             nn.Conv2d(1, ch1, 1, stride=1, padding=0, bias=False),

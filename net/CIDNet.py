@@ -15,6 +15,7 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  norm=False,  # 是否使用 LayerNorm
                  use_wtconv_i=True,
                  use_dwconv_hv=False,
+                 fe_type='legacy',
                  lca_type='cab'):
         super(CIDNet, self).__init__()
 
@@ -40,8 +41,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         #     nn.Conv2d(1, ch1, 3, stride=1, padding=0, bias=False),
         # )
 
-        self.HVE_block0 = hv_fe(ch1, use_dwconv_hv)
-        self.IE_block0 = i_fe(ch1, use_wtconv_i)
+        self.HVE_block0 = hv_fe(ch1, use_dwconv_hv, fe_type=fe_type)
+        self.IE_block0 = i_fe(ch1, use_wtconv_i, fe_type=fe_type)
         # 接下来是下采样模块（NormDownsample 定义在 transformer_utils.py）
         # 每经过一个 Downsample，空间尺寸减半、通道数增加
         # eg: (B, 36, 384, 384) → (B, 36, 192, 192)
