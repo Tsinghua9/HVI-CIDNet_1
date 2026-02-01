@@ -96,6 +96,8 @@ def option():
     parser.add_argument('--D_weight',  type=float, default=0.5)
     parser.add_argument('--E_weight',  type=float, default=50.0)
     parser.add_argument('--P_weight',  type=float, default=1e-2)
+    parser.add_argument('--loss_gtmean', type=_str2bool, default=False, help='enable GT-Mean L1 loss for RGB and HVI')
+    parser.add_argument('--gtmean_sigma', type=float, default=0.1, help='sigma for GT-Mean loss')
     parser.add_argument('--loss_ccl', type=_str2bool, default=False, help='enable Covariance Correction Loss (CCL)')
     parser.add_argument('--ccl_weight', type=float, default=1.0, help='weight for CCL loss')
     # parser.add_argument('--HVI_weight', type=float, default=1.0)

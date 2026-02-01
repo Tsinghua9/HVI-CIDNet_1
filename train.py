@@ -174,8 +174,14 @@ def train(epoch):
         gt_rgb = im2
         output_hvi = model.HVIT(output_rgb)
         gt_hvi = model.HVIT(gt_rgb)
-        loss_hvi = L1_loss(output_hvi, gt_hvi) + D_loss(output_hvi, gt_hvi) + E_loss(output_hvi, gt_hvi) + opt.P_weight * P_loss(output_hvi, gt_hvi)[0]
-        loss_rgb = L1_loss(output_rgb, gt_rgb) + D_loss(output_rgb, gt_rgb) + E_loss(output_rgb, gt_rgb) + opt.P_weight * P_loss(output_rgb, gt_rgb)[0]
+        if opt.loss_gtmean:
+            l1_hvi = opt.L1_weight * GTmean_hvi(output_hvi, gt_hvi)
+            l1_rgb = opt.L1_weight * GTmean_rgb(output_rgb, gt_rgb)
+        else:
+            l1_hvi = L1_loss(output_hvi, gt_hvi)
+            l1_rgb = L1_loss(output_rgb, gt_rgb)
+        loss_hvi = l1_hvi + D_loss(output_hvi, gt_hvi) + E_loss(output_hvi, gt_hvi) + opt.P_weight * P_loss(output_hvi, gt_hvi)[0]
+        loss_rgb = l1_rgb + D_loss(output_rgb, gt_rgb) + E_loss(output_rgb, gt_rgb) + opt.P_weight * P_loss(output_rgb, gt_rgb)[0]
         loss = loss_rgb + opt.HVI_weight * loss_hvi
         if opt.loss_ccl:
             loss_ccl = CCL_loss(output_hvi, gt_hvi)
@@ -317,7 +323,9 @@ def init_loss():
     E_loss = EdgeLoss(loss_weight=E_weight).cuda()
     P_loss = PerceptualLoss({'conv1_2': 1, 'conv2_2': 1,'conv3_4': 1,'conv4_4': 1}, perceptual_weight = P_weight ,criterion='mse').cuda()
     CCL_loss = CCLLoss(loss_weight=1.0).cuda()
-    return L1_loss, P_loss, E_loss, D_loss, CCL_loss
+    GTmean_rgb = GTMeanLoss(sigma=opt.gtmean_sigma, mode="luma").cuda()
+    GTmean_hvi = GTMeanLoss(sigma=opt.gtmean_sigma, mode="channel2").cuda()
+    return L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi
 
 if __name__ == '__main__':  
     
@@ -345,7 +353,7 @@ if __name__ == '__main__':
                 base.region_attn2.alpha.data.fill_(float(opt.attn_alpha2_init))
                 base.region_attn2.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale2_init))
     optimizer,scheduler = make_scheduler()
-    L1_loss, P_loss, E_loss, D_loss, CCL_loss = init_loss()
+    L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi = init_loss()
     
     '''
     train
@@ -375,6 +383,8 @@ if __name__ == '__main__':
         f.write(f"D_weight: {opt.D_weight}\n")
         f.write(f"E_weight: {opt.E_weight}\n")
         f.write(f"P_weight: {opt.P_weight}\n")
+        f.write(f"loss_gtmean: {opt.loss_gtmean}\n")
+        f.write(f"gtmean_sigma: {opt.gtmean_sigma}\n")
         f.write(f"use_region_prior: {opt.use_region_prior}\n")
         f.write(f"prior_mode: {opt.prior_mode}\n")
         f.write(f"use_wtconv_i: {opt.use_wtconv_i}\n")

@@ -38,6 +38,47 @@ class L1Loss(nn.Module):
         
         
         
+class GTMeanLoss(nn.Module):
+    def __init__(self, sigma=0.1, mode="luma", eps=1e-6):
+        super().__init__()
+        self.sigma = sigma
+        self.mode = mode
+        self.eps = eps
+
+    def _brightness(self, x):
+        if x.shape[1] == 1:
+            return x.mean(dim=(1, 2, 3))
+        if self.mode == "channel2":
+            return x[:, 2:3, :, :].mean(dim=(1, 2, 3))
+        weights = x.new_tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)
+        y = (x[:, :3, :, :] * weights).sum(dim=1, keepdim=True)
+        return y.mean(dim=(1, 2, 3))
+
+    def _double_kl_div_2(self, mu_1, mu_2):
+        sigma_1 = self.sigma * mu_1.abs()
+        sigma_2 = self.sigma * mu_2.abs()
+        mu_m = 0.5 * (mu_1 + mu_2)
+        sigma_m = torch.sqrt((sigma_1 ** 2 + sigma_2 ** 2) / 2 + self.eps)
+        kl_1 = torch.log((sigma_m + self.eps) / (sigma_1 + self.eps)) + 0.5 * (
+            (sigma_1 ** 2 + (mu_1 - mu_m) ** 2) / ((sigma_m + self.eps) ** 2)
+        ) - 0.5
+        kl_2 = torch.log((sigma_m + self.eps) / (sigma_2 + self.eps)) + 0.5 * (
+            (sigma_2 ** 2 + (mu_2 - mu_m) ** 2) / ((sigma_m + self.eps) ** 2)
+        ) - 0.5
+        return 0.5 * kl_1 + 0.5 * kl_2
+
+    def forward(self, pred, target):
+        e_y = self._brightness(target)
+        e_x = self._brightness(pred)
+        weight = torch.clamp(self._double_kl_div_2(e_y, e_x), 0.0, 1.0).detach()
+        m = e_y / (e_x + self.eps)
+        pred_clip = torch.clamp(m[:, None, None, None] * pred, 0.0, 1.0)
+        l1_raw = (pred - target).abs().mean(dim=(1, 2, 3))
+        l1_clip = (pred_clip - target).abs().mean(dim=(1, 2, 3))
+        loss = weight * l1_raw + (1.0 - weight) * l1_clip
+        return loss.mean()
+
+
 class EdgeLoss(nn.Module):
     def __init__(self,loss_weight=1.0, reduction='mean'):
         super(EdgeLoss, self).__init__()
@@ -216,5 +257,4 @@ class CCLLoss(nn.Module):
         l_hv = l_hv * l_hv
 
         return self.loss_weight * (l_i + l_i_hv + l_hv)
-
 
