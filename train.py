@@ -174,11 +174,15 @@ def train(epoch):
         gt_rgb = im2
         output_hvi = model.HVIT(output_rgb)
         gt_hvi = model.HVIT(gt_rgb)
-        if opt.loss_gtmean:
+        use_gtmean_rgb = opt.loss_gtmean or opt.loss_gtmean_rgb
+        use_gtmean_hvi = opt.loss_gtmean or opt.loss_gtmean_hvi
+        if use_gtmean_hvi:
             l1_hvi = opt.L1_weight * GTmean_hvi(output_hvi, gt_hvi)
-            l1_rgb = opt.L1_weight * GTmean_rgb(output_rgb, gt_rgb)
         else:
             l1_hvi = L1_loss(output_hvi, gt_hvi)
+        if use_gtmean_rgb:
+            l1_rgb = opt.L1_weight * GTmean_rgb(output_rgb, gt_rgb)
+        else:
             l1_rgb = L1_loss(output_rgb, gt_rgb)
         loss_hvi = l1_hvi + D_loss(output_hvi, gt_hvi) + E_loss(output_hvi, gt_hvi) + opt.P_weight * P_loss(output_hvi, gt_hvi)[0]
         loss_rgb = l1_rgb + D_loss(output_rgb, gt_rgb) + E_loss(output_rgb, gt_rgb) + opt.P_weight * P_loss(output_rgb, gt_rgb)[0]
@@ -384,6 +388,8 @@ if __name__ == '__main__':
         f.write(f"E_weight: {opt.E_weight}\n")
         f.write(f"P_weight: {opt.P_weight}\n")
         f.write(f"loss_gtmean: {opt.loss_gtmean}\n")
+        f.write(f"loss_gtmean_rgb: {opt.loss_gtmean_rgb}\n")
+        f.write(f"loss_gtmean_hvi: {opt.loss_gtmean_hvi}\n")
         f.write(f"gtmean_sigma: {opt.gtmean_sigma}\n")
         f.write(f"use_region_prior: {opt.use_region_prior}\n")
         f.write(f"prior_mode: {opt.prior_mode}\n")
