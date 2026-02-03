@@ -27,7 +27,6 @@ def option():
                         help='front-end stem type; legacy uses use_wtconv_i/use_dwconv_hv')
     parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'diem', 'waveformer'],
                         help='LCA type: cab (default), diem, or waveformer')
-
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
     parser.add_argument('--prior_label_dir', type=str, default=None, help='label folder; defaults to <train_root>/label if not set')
@@ -96,7 +95,6 @@ def option():
     parser.add_argument('--D_weight',  type=float, default=0.5)
     parser.add_argument('--E_weight',  type=float, default=50.0)
     parser.add_argument('--P_weight',  type=float, default=1e-2)
-    parser.add_argument('--loss_gtmean', type=_str2bool, default=False, help='enable GT-Mean L1 loss for RGB and HVI')
     parser.add_argument('--loss_gtmean_rgb', type=_str2bool, default=False, help='enable GT-Mean L1 loss for RGB branch')
     parser.add_argument('--loss_gtmean_hvi', type=_str2bool, default=False, help='enable GT-Mean L1 loss for HVI branch')
     parser.add_argument('--gtmean_sigma', type=float, default=0.1, help='sigma for GT-Mean loss')

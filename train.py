@@ -174,8 +174,8 @@ def train(epoch):
         gt_rgb = im2
         output_hvi = model.HVIT(output_rgb)
         gt_hvi = model.HVIT(gt_rgb)
-        use_gtmean_rgb = opt.loss_gtmean or opt.loss_gtmean_rgb
-        use_gtmean_hvi = opt.loss_gtmean or opt.loss_gtmean_hvi
+        use_gtmean_rgb = opt.loss_gtmean_rgb
+        use_gtmean_hvi = opt.loss_gtmean_hvi
         if use_gtmean_hvi:
             l1_hvi = opt.L1_weight * GTmean_hvi(output_hvi, gt_hvi)
         else:
@@ -387,7 +387,6 @@ if __name__ == '__main__':
         f.write(f"D_weight: {opt.D_weight}\n")
         f.write(f"E_weight: {opt.E_weight}\n")
         f.write(f"P_weight: {opt.P_weight}\n")
-        f.write(f"loss_gtmean: {opt.loss_gtmean}\n")
         f.write(f"loss_gtmean_rgb: {opt.loss_gtmean_rgb}\n")
         f.write(f"loss_gtmean_hvi: {opt.loss_gtmean_hvi}\n")
         f.write(f"gtmean_sigma: {opt.gtmean_sigma}\n")
