@@ -16,6 +16,12 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  use_wtconv_i=True,
                  use_dwconv_hv=False,
                  fe_type='legacy',
+                 use_ode_cdem=False,
+                 ode_window=True,
+                 ode_window_size=8,
+                 ode_k=8,
+                 ode_method="rk4",
+                 ode_tol=1e-3,
                  lca_type='cab'):
         super(CIDNet, self).__init__()
 
@@ -81,28 +87,53 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         if lca_type == 'cab':
             hv_lca = HV_LCA
             i_lca = I_LCA
+            ode_cfg = None
         elif lca_type == 'diem':
             hv_lca = DIEMHV_LCA
             i_lca = DIEMI_LCA
+            ode_cfg = {
+                "enabled": bool(use_ode_cdem),
+                "window": bool(ode_window),
+                "window_size": int(ode_window_size),
+                "k": int(ode_k),
+                "method": str(ode_method),
+                "tol": float(ode_tol),
+            }
         elif lca_type == 'waveformer':
             hv_lca = WaveFormerHV_LCA
             i_lca = WaveFormerI_LCA
+            ode_cfg = None
         else:
             raise ValueError(f"Unknown lca_type: {lca_type}")
 
-        self.HV_LCA1 = hv_lca(ch2, head2)
-        self.HV_LCA2 = hv_lca(ch3, head3)
-        self.HV_LCA3 = hv_lca(ch4, head4)
-        self.HV_LCA4 = hv_lca(ch4, head4)
-        self.HV_LCA5 = hv_lca(ch3, head3)
-        self.HV_LCA6 = hv_lca(ch2, head2)
+        if ode_cfg is None:
+            self.HV_LCA1 = hv_lca(ch2, head2)
+            self.HV_LCA2 = hv_lca(ch3, head3)
+            self.HV_LCA3 = hv_lca(ch4, head4)
+            self.HV_LCA4 = hv_lca(ch4, head4)
+            self.HV_LCA5 = hv_lca(ch3, head3)
+            self.HV_LCA6 = hv_lca(ch2, head2)
 
-        self.I_LCA1 = i_lca(ch2, head2)
-        self.I_LCA2 = i_lca(ch3, head3)
-        self.I_LCA3 = i_lca(ch4, head4)
-        self.I_LCA4 = i_lca(ch4, head4)
-        self.I_LCA5 = i_lca(ch3, head3)
-        self.I_LCA6 = i_lca(ch2, head2)
+            self.I_LCA1 = i_lca(ch2, head2)
+            self.I_LCA2 = i_lca(ch3, head3)
+            self.I_LCA3 = i_lca(ch4, head4)
+            self.I_LCA4 = i_lca(ch4, head4)
+            self.I_LCA5 = i_lca(ch3, head3)
+            self.I_LCA6 = i_lca(ch2, head2)
+        else:
+            self.HV_LCA1 = hv_lca(ch2, head2, ode_cfg=ode_cfg)
+            self.HV_LCA2 = hv_lca(ch3, head3, ode_cfg=ode_cfg)
+            self.HV_LCA3 = hv_lca(ch4, head4, ode_cfg=ode_cfg)
+            self.HV_LCA4 = hv_lca(ch4, head4, ode_cfg=ode_cfg)
+            self.HV_LCA5 = hv_lca(ch3, head3, ode_cfg=ode_cfg)
+            self.HV_LCA6 = hv_lca(ch2, head2, ode_cfg=ode_cfg)
+
+            self.I_LCA1 = i_lca(ch2, head2, ode_cfg=ode_cfg)
+            self.I_LCA2 = i_lca(ch3, head3, ode_cfg=ode_cfg)
+            self.I_LCA3 = i_lca(ch4, head4, ode_cfg=ode_cfg)
+            self.I_LCA4 = i_lca(ch4, head4, ode_cfg=ode_cfg)
+            self.I_LCA5 = i_lca(ch3, head3, ode_cfg=ode_cfg)
+            self.I_LCA6 = i_lca(ch2, head2, ode_cfg=ode_cfg)
 
         self.trans = RGB_HVI()
 

@@ -292,6 +292,12 @@ def build_model():
     model = CIDNet(use_wtconv_i=opt.use_wtconv_i,
                    use_dwconv_hv=opt.use_dwconv_hv,
                    fe_type=opt.fe_type,
+                   use_ode_cdem=opt.use_ode_cdem,
+                   ode_window=opt.ode_window,
+                   ode_window_size=opt.ode_window_size,
+                   ode_k=opt.ode_k,
+                   ode_method=opt.ode_method,
+                   ode_tol=opt.ode_tol,
                    lca_type=opt.lca_type).cuda()
     if opt.start_epoch > 0:
         pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
@@ -396,6 +402,12 @@ if __name__ == '__main__':
         f.write(f"use_dwconv_hv: {opt.use_dwconv_hv}\n")
         f.write(f"fe_type: {opt.fe_type}\n")
         f.write(f"lca_type: {opt.lca_type}\n")
+        f.write(f"use_ode_cdem: {opt.use_ode_cdem}\n")
+        f.write(f"ode_window: {opt.ode_window}\n")
+        f.write(f"ode_window_size: {opt.ode_window_size}\n")
+        f.write(f"ode_k: {opt.ode_k}\n")
+        f.write(f"ode_method: {opt.ode_method}\n")
+        f.write(f"ode_tol: {opt.ode_tol}\n")
         f.write(f"loss_ccl: {opt.loss_ccl}\n")
         f.write(f"ccl_weight: {opt.ccl_weight}\n")
         f.write(f"prior_label_dir: {opt.prior_label_dir}\n")

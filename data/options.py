@@ -27,6 +27,12 @@ def option():
                         help='front-end stem type; legacy uses use_wtconv_i/use_dwconv_hv')
     parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'diem', 'waveformer'],
                         help='LCA type: cab (default), diem, or waveformer')
+    parser.add_argument('--use_ode_cdem', type=_str2bool, default=False, help='use ODE-FFN inside CDEM for DIEM')
+    parser.add_argument('--ode_window', type=_str2bool, default=True, help='apply ODE in local windows')
+    parser.add_argument('--ode_window_size', type=int, default=8, help='window size for ODE (pixels)')
+    parser.add_argument('--ode_k', type=int, default=8, help='top-k neighbors for ODE')
+    parser.add_argument('--ode_method', type=str, default='rk4', help='odeint method (e.g., rk4, dopri5)')
+    parser.add_argument('--ode_tol', type=float, default=1e-3, help='odeint rtol/atol')
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
     parser.add_argument('--prior_label_dir', type=str, default=None, help='label folder; defaults to <train_root>/label if not set')

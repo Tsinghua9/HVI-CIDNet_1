@@ -10,3 +10,5 @@ dependencies:
   - torchaudio=2.1.2
   - pytorch-cuda=12.1
   - pip
+  - pip:
+      - torchdiffeq==0.2.5
