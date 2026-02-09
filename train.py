@@ -135,6 +135,11 @@ def train_init():
     
 def train(epoch):
     model.train()
+    base = model.module if hasattr(model, "module") else model
+    if hasattr(base, "set_diem_router_progress"):
+        denom = max(opt.nEpochs - 1, 1)
+        progress = float(max(0.0, min(1.0, (epoch - 1) / denom)))
+        base.set_diem_router_progress(progress)
     loss_print = 0
     pic_cnt = 0
     loss_last_10 = 0
@@ -158,18 +163,25 @@ def train(epoch):
         if opt.use_region_prior:
             index_map = index_map.cuda(non_blocking=True)
         
+        use_aux = opt.lca_type == "diem_v2" and (opt.loss_prior_align or opt.loss_expert_balance)
+        model_kwargs = {"return_aux": use_aux}
+        if opt.use_region_prior:
+            model_kwargs["index_map"] = index_map
+            model_kwargs["prior_mode"] = opt.prior_mode
+
         # use random gamma function (enhancement curve) to improve generalization
         if opt.gamma:
             gamma = random.randint(opt.start_gamma,opt.end_gamma) / 100.0
-            if opt.use_region_prior:
-                output_rgb = model(im1 ** gamma, index_map=index_map, prior_mode=opt.prior_mode)
-            else:
-                output_rgb = model(im1 ** gamma)
+            model_input = im1 ** gamma
         else:
-            if opt.use_region_prior:
-                output_rgb = model(im1, index_map=index_map, prior_mode=opt.prior_mode)
-            else:
-                output_rgb = model(im1)
+            model_input = im1
+
+        model_out = model(model_input, **model_kwargs)
+        if use_aux:
+            output_rgb, aux_dict = model_out
+        else:
+            output_rgb = model_out
+            aux_dict = {}
             
         gt_rgb = im2
         output_hvi = model.HVIT(output_rgb)
@@ -190,6 +202,12 @@ def train(epoch):
         if opt.loss_ccl:
             loss_ccl = CCL_loss(output_hvi, gt_hvi)
             loss = loss + opt.ccl_weight * loss_ccl
+        if opt.lca_type == "diem_v2" and opt.loss_prior_align:
+            loss_prior_align = PriorAlign_loss(aux_dict.get("prior_align", []), output_rgb)
+            loss = loss + opt.prior_align_weight * loss_prior_align
+        if opt.lca_type == "diem_v2" and opt.loss_expert_balance:
+            loss_expert_balance = ExpertBalance_loss(aux_dict.get("router_probs", []), output_rgb)
+            loss = loss + opt.expert_balance_weight * loss_expert_balance
         iter += 1
         
         if opt.grad_clip:
@@ -298,10 +316,17 @@ def build_model():
                    ode_k=opt.ode_k,
                    ode_method=opt.ode_method,
                    ode_tol=opt.ode_tol,
+                   diem_num_experts=opt.diem_num_experts,
+                   diem_router_temp=opt.diem_router_temp,
                    lca_type=opt.lca_type).cuda()
     if opt.start_epoch > 0:
         pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
-        model.load_state_dict(torch.load(pth, map_location=lambda storage, loc: storage))
+        ckpt = torch.load(pth, map_location=lambda storage, loc: storage)
+        strict_load = (opt.lca_type != "diem_v2")
+        msg = model.load_state_dict(ckpt, strict=strict_load)
+        if not strict_load:
+            print(f"[ckpt] strict=False for diem_v2 migration.")
+            print(f"[ckpt] missing_keys={len(msg.missing_keys)} unexpected_keys={len(msg.unexpected_keys)}")
     return model
 
 def make_scheduler():
@@ -335,7 +360,9 @@ def init_loss():
     CCL_loss = CCLLoss(loss_weight=1.0).cuda()
     GTmean_rgb = GTMeanLoss(sigma=opt.gtmean_sigma, mode="luma").cuda()
     GTmean_hvi = GTMeanLoss(sigma=opt.gtmean_sigma, mode="channel2").cuda()
-    return L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi
+    PriorAlign_loss = PriorAlignLoss(loss_weight=1.0).cuda()
+    ExpertBalance_loss = ExpertBalanceLoss(loss_weight=1.0).cuda()
+    return L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi, PriorAlign_loss, ExpertBalance_loss
 
 if __name__ == '__main__':  
     
@@ -363,7 +390,7 @@ if __name__ == '__main__':
                 base.region_attn2.alpha.data.fill_(float(opt.attn_alpha2_init))
                 base.region_attn2.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale2_init))
     optimizer,scheduler = make_scheduler()
-    L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi = init_loss()
+    L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi, PriorAlign_loss, ExpertBalance_loss = init_loss()
     
     '''
     train
@@ -408,8 +435,14 @@ if __name__ == '__main__':
         f.write(f"ode_k: {opt.ode_k}\n")
         f.write(f"ode_method: {opt.ode_method}\n")
         f.write(f"ode_tol: {opt.ode_tol}\n")
+        f.write(f"diem_num_experts: {opt.diem_num_experts}\n")
+        f.write(f"diem_router_temp: {opt.diem_router_temp}\n")
         f.write(f"loss_ccl: {opt.loss_ccl}\n")
         f.write(f"ccl_weight: {opt.ccl_weight}\n")
+        f.write(f"loss_prior_align: {opt.loss_prior_align}\n")
+        f.write(f"prior_align_weight: {opt.prior_align_weight}\n")
+        f.write(f"loss_expert_balance: {opt.loss_expert_balance}\n")
+        f.write(f"expert_balance_weight: {opt.expert_balance_weight}\n")
         f.write(f"prior_label_dir: {opt.prior_label_dir}\n")
         f.write(f"max_regions: {opt.max_regions}\n")
         f.write(f"attn_alpha1_init: {opt.attn_alpha1_init}\n")

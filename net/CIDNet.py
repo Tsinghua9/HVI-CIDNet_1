@@ -22,12 +22,19 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  ode_k=8,
                  ode_method="rk4",
                  ode_tol=1e-3,
+                 diem_num_experts=3,
+                 diem_router_temp=1.0,
                  lca_type='cab'):
         super(CIDNet, self).__init__()
 
         # 解包通道数和 head 数量，方便后面使用
         [ch1, ch2, ch3, ch4] = channels
         [head1, head2, head3, head4] = heads
+        self.ch2 = ch2
+        self.ch3 = ch3
+        self.ch4 = ch4
+        self.lca_type = lca_type
+        self._is_diem_v2 = lca_type == "diem_v2"
 
         # -----------------------------------------------------------
         #                HV 分支（H 和 V 通道） - Encoder 部分
@@ -103,10 +110,14 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             hv_lca = WaveFormerHV_LCA
             i_lca = WaveFormerI_LCA
             ode_cfg = None
+        elif lca_type == 'diem_v2':
+            hv_lca = DIEMHV_LCA_V2
+            i_lca = DIEMI_LCA_V2
+            ode_cfg = None
         else:
             raise ValueError(f"Unknown lca_type: {lca_type}")
 
-        if ode_cfg is None:
+        if ode_cfg is None and lca_type != "diem_v2":
             self.HV_LCA1 = hv_lca(ch2, head2)
             self.HV_LCA2 = hv_lca(ch3, head3)
             self.HV_LCA3 = hv_lca(ch4, head4)
@@ -120,6 +131,20 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             self.I_LCA4 = i_lca(ch4, head4)
             self.I_LCA5 = i_lca(ch3, head3)
             self.I_LCA6 = i_lca(ch2, head2)
+        elif lca_type == "diem_v2":
+            self.HV_LCA1 = hv_lca(ch2, head2, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.HV_LCA2 = hv_lca(ch3, head3, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.HV_LCA3 = hv_lca(ch4, head4, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.HV_LCA4 = hv_lca(ch4, head4, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.HV_LCA5 = hv_lca(ch3, head3, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.HV_LCA6 = hv_lca(ch2, head2, num_experts=diem_num_experts, router_temp=diem_router_temp)
+
+            self.I_LCA1 = i_lca(ch2, head2, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.I_LCA2 = i_lca(ch3, head3, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.I_LCA3 = i_lca(ch4, head4, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.I_LCA4 = i_lca(ch4, head4, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.I_LCA5 = i_lca(ch3, head3, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.I_LCA6 = i_lca(ch2, head2, num_experts=diem_num_experts, router_temp=diem_router_temp)
         else:
             self.HV_LCA1 = hv_lca(ch2, head2, ode_cfg=ode_cfg)
             self.HV_LCA2 = hv_lca(ch3, head3, ode_cfg=ode_cfg)
@@ -134,6 +159,13 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             self.I_LCA4 = i_lca(ch4, head4, ode_cfg=ode_cfg)
             self.I_LCA5 = i_lca(ch3, head3, ode_cfg=ode_cfg)
             self.I_LCA6 = i_lca(ch2, head2, ode_cfg=ode_cfg)
+
+        if self._is_diem_v2:
+            self.ctx2_to3 = nn.Linear(ch2, ch3)
+            self.ctx4_to3 = nn.Linear(ch4, ch3)
+        else:
+            self.ctx2_to3 = None
+            self.ctx4_to3 = None
 
         self.trans = RGB_HVI()
 
@@ -162,10 +194,69 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         self.region_attn2.mask_bias_scale_max = 0.65
         self.structure_gate2 = StructureGate(ch4)
 
-    def forward(self, x, index_map=None, prior_mode: str = 'gate'):
+    def _ctx_single(self, S, V):
+        if S is None or V is None:
+            return None
+        return {"entries": [{"S": S, "V": V, "weight": 1.0}]}
+
+    def _ctx_ch3_from_ch2(self, S2, V2):
+        if S2 is None or V2 is None:
+            return None
+        if self.ctx2_to3 is None:
+            return self._ctx_single(S2, V2)
+        return {"entries": [{"S": S2, "V": self.ctx2_to3(V2), "weight": 1.0}]}
+
+    def _ctx_ch3_fused(self, S2, V2, S4, V4):
+        entries = []
+        if S2 is not None and V2 is not None:
+            v2 = self.ctx2_to3(V2) if self.ctx2_to3 is not None else V2
+            entries.append({"S": S2, "V": v2, "weight": 1.0})
+        if S4 is not None and V4 is not None:
+            v4 = self.ctx4_to3(V4) if self.ctx4_to3 is not None else V4
+            entries.append({"S": S4, "V": v4, "weight": 1.0})
+        if not entries:
+            return None
+        norm = 1.0 / float(len(entries))
+        for e in entries:
+            e["weight"] = float(e["weight"]) * norm
+        return {"entries": entries}
+
+    def _lca_call(self, module, a, b, prior_ctx=None, collect_aux=False):
+        supports_prior = bool(getattr(module, "supports_prior_ctx", False))
+        if supports_prior:
+            if collect_aux:
+                out, aux = module(a, b, prior_ctx=prior_ctx, return_aux=True)
+                return out, aux
+            return module(a, b, prior_ctx=prior_ctx, return_aux=False), None
+        if collect_aux:
+            return module(a, b), None
+        return module(a, b), None
+
+    def set_diem_router_progress(self, progress: float):
+        for module in [
+            self.HV_LCA1, self.HV_LCA2, self.HV_LCA3, self.HV_LCA4, self.HV_LCA5, self.HV_LCA6,
+            self.I_LCA1, self.I_LCA2, self.I_LCA3, self.I_LCA4, self.I_LCA5, self.I_LCA6,
+        ]:
+            if hasattr(module, "set_progress"):
+                module.set_progress(progress)
+
+    def forward(self, x, index_map=None, prior_mode: str = 'gate', return_aux: bool = False):
         dtypes = x.dtype
         hvi = self.trans.HVIT(x)  # [B, 3, H, W] -> [H,V,I]
         i = hvi[:, 2, :, :].unsqueeze(1).to(dtypes)  # 抽出 I 通道给 I 分支
+
+        aux_bucket = {"prior_align": [], "router_probs": []}
+
+        def _collect(aux):
+            if not return_aux or aux is None:
+                return
+            prior_align = aux.get("prior_align", None)
+            if prior_align is not None:
+                aux_bucket["prior_align"].append(prior_align)
+            router_probs = aux.get("router_probs", None)
+            if router_probs is not None:
+                aux_bucket["router_probs"].append(router_probs)
+
         # low
         # Intensity分支
         i_enc0 = self.IE_block0(i)
@@ -177,7 +268,16 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         i_jump0 = i_enc0
         hv_jump0 = hv_0
 
-        i_enc2 = self.I_LCA1(i_enc1, hv_1)
+        S2 = V2 = S4 = V4 = None
+        ctx_ch2 = ctx_ch3 = ctx_ch4 = None
+        if index_map is not None:
+            S2 = self.soft_mask(index_map, target_hw=i_enc1.shape[-2:])
+            V2 = self.region_pool(i_enc1, S2)
+            ctx_ch2 = self._ctx_single(S2, V2)
+            ctx_ch3 = self._ctx_ch3_from_ch2(S2, V2)
+
+        i_enc2, aux = self._lca_call(self.I_LCA1, i_enc1, hv_1, prior_ctx=ctx_ch2, collect_aux=return_aux)
+        _collect(aux)
         # Apply region prior after first cross-branch interaction (safer than pre-LCA)
         if index_map is not None:
             target_hw = i_enc2.shape[-2:]
@@ -193,14 +293,22 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             else:
                 A = self.boundary_map(index_map, target_hw=target_hw)
                 i_enc2 = self.structure_gate(i_enc2, A)
-        hv_2 = self.HV_LCA1(hv_1, i_enc1)
+            S2 = self.soft_mask(index_map, target_hw=target_hw)
+            V2 = self.region_pool(i_enc2, S2)
+            ctx_ch2 = self._ctx_single(S2, V2)
+            ctx_ch3 = self._ctx_ch3_from_ch2(S2, V2)
+
+        hv_2, aux = self._lca_call(self.HV_LCA1, hv_1, i_enc1, prior_ctx=ctx_ch2, collect_aux=return_aux)
+        _collect(aux)
         v_jump1 = i_enc2
         hv_jump1 = hv_2
         i_enc2 = self.IE_block2(i_enc2)
         hv_2 = self.HVE_block2(hv_2)
 
-        i_enc3 = self.I_LCA2(i_enc2, hv_2)
-        hv_3 = self.HV_LCA2(hv_2, i_enc2)
+        i_enc3, aux = self._lca_call(self.I_LCA2, i_enc2, hv_2, prior_ctx=ctx_ch3, collect_aux=return_aux)
+        _collect(aux)
+        hv_3, aux = self._lca_call(self.HV_LCA2, hv_2, i_enc2, prior_ctx=ctx_ch3, collect_aux=return_aux)
+        _collect(aux)
         v_jump2 = i_enc3
         hv_jump2 = hv_3
         # 按照网络结构图应该是这样：
@@ -225,17 +333,27 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             else:
                 A = self.boundary_map(index_map, target_hw=target_hw)
                 i_enc3 = self.structure_gate2(i_enc3, A)
+            S4 = self.soft_mask(index_map, target_hw=target_hw)
+            V4 = self.region_pool(i_enc3, S4)
+            ctx_ch4 = self._ctx_single(S4, V4)
+            ctx_ch3 = self._ctx_ch3_fused(S2, V2, S4, V4)
 
-        i_enc4 = self.I_LCA3(i_enc3, hv_3)
-        hv_4 = self.HV_LCA3(hv_3, i_enc3)
+        i_enc4, aux = self._lca_call(self.I_LCA3, i_enc3, hv_3, prior_ctx=ctx_ch4, collect_aux=return_aux)
+        _collect(aux)
+        hv_4, aux = self._lca_call(self.HV_LCA3, hv_3, i_enc3, prior_ctx=ctx_ch4, collect_aux=return_aux)
+        _collect(aux)
 
-        i_dec4 = self.I_LCA4(i_enc4, hv_4)
-        hv_4 = self.HV_LCA4(hv_4, i_enc4)
+        i_dec4, aux = self._lca_call(self.I_LCA4, i_enc4, hv_4, prior_ctx=ctx_ch4, collect_aux=return_aux)
+        _collect(aux)
+        hv_4, aux = self._lca_call(self.HV_LCA4, hv_4, i_enc4, prior_ctx=ctx_ch4, collect_aux=return_aux)
+        _collect(aux)
 
         hv_3 = self.HVD_block3(hv_4, hv_jump2)
         i_dec3 = self.ID_block3(i_dec4, v_jump2)
-        i_dec2 = self.I_LCA5(i_dec3, hv_3)
-        hv_2 = self.HV_LCA5(hv_3, i_dec3)
+        i_dec2, aux = self._lca_call(self.I_LCA5, i_dec3, hv_3, prior_ctx=ctx_ch3, collect_aux=return_aux)
+        _collect(aux)
+        hv_2, aux = self._lca_call(self.HV_LCA5, hv_3, i_dec3, prior_ctx=ctx_ch3, collect_aux=return_aux)
+        _collect(aux)
 
         hv_2 = self.HVD_block2(hv_2, hv_jump1)
         # 按照网络结构图应该是这样：
@@ -243,8 +361,10 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         # 原来仓库代码：
         # i_dec2 = self.ID_block2(i_dec3, v_jump1)
 
-        i_dec1 = self.I_LCA6(i_dec2, hv_2)
-        hv_1 = self.HV_LCA6(hv_2, i_dec2)
+        i_dec1, aux = self._lca_call(self.I_LCA6, i_dec2, hv_2, prior_ctx=ctx_ch2, collect_aux=return_aux)
+        _collect(aux)
+        hv_1, aux = self._lca_call(self.HV_LCA6, hv_2, i_dec2, prior_ctx=ctx_ch2, collect_aux=return_aux)
+        _collect(aux)
 
         i_dec1 = self.ID_block1(i_dec1, i_jump0)
         i_dec0 = self.ID_block0(i_dec1)
@@ -254,6 +374,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         output_hvi = torch.cat([hv_0, i_dec0], dim=1) + hvi
         output_rgb = self.trans.PHVIT(output_hvi)
 
+        if return_aux:
+            return output_rgb, aux_bucket
         return output_rgb
 
     def HVIT(self, x):

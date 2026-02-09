@@ -25,14 +25,16 @@ def option():
     parser.add_argument('--use_dwconv_hv', type=_str2bool, default=False, help='use depthwise separable stem for HV branch')
     parser.add_argument('--fe_type', type=str, default='legacy', choices=['legacy', 'dual_gate'],
                         help='front-end stem type; legacy uses use_wtconv_i/use_dwconv_hv')
-    parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'diem', 'waveformer'],
-                        help='LCA type: cab (default), diem, or waveformer')
+    parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'diem', 'diem_v2', 'waveformer'],
+                        help='LCA type: cab (default), diem, diem_v2, or waveformer')
     parser.add_argument('--use_ode_cdem', type=_str2bool, default=False, help='use ODE-FFN inside CDEM for DIEM')
     parser.add_argument('--ode_window', type=_str2bool, default=True, help='apply ODE in local windows')
     parser.add_argument('--ode_window_size', type=int, default=8, help='window size for ODE (pixels)')
     parser.add_argument('--ode_k', type=int, default=8, help='top-k neighbors for ODE')
     parser.add_argument('--ode_method', type=str, default='rk4', help='odeint method (e.g., rk4, dopri5)')
     parser.add_argument('--ode_tol', type=float, default=1e-3, help='odeint rtol/atol')
+    parser.add_argument('--diem_num_experts', type=int, default=3, help='number of experts in DIEM_v2 dynamic FFN')
+    parser.add_argument('--diem_router_temp', type=float, default=1.0, help='base router temperature for DIEM_v2')
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
     parser.add_argument('--prior_label_dir', type=str, default=None, help='label folder; defaults to <train_root>/label if not set')
@@ -106,6 +108,10 @@ def option():
     parser.add_argument('--gtmean_sigma', type=float, default=0.1, help='sigma for GT-Mean loss')
     parser.add_argument('--loss_ccl', type=_str2bool, default=False, help='enable Covariance Correction Loss (CCL)')
     parser.add_argument('--ccl_weight', type=float, default=1.0, help='weight for CCL loss')
+    parser.add_argument('--loss_prior_align', type=_str2bool, default=True, help='enable prior-attn alignment auxiliary loss')
+    parser.add_argument('--prior_align_weight', type=float, default=0.05, help='weight for prior alignment loss')
+    parser.add_argument('--loss_expert_balance', type=_str2bool, default=True, help='enable expert balance auxiliary loss')
+    parser.add_argument('--expert_balance_weight', type=float, default=0.01, help='weight for expert balance loss')
     # parser.add_argument('--HVI_weight', type=float, default=1.0)
     # parser.add_argument('--L1_weight', type=float, default=0)
     # parser.add_argument('--D_weight',  type=float, default=0)

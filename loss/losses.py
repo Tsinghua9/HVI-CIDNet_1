@@ -258,3 +258,39 @@ class CCLLoss(nn.Module):
 
         return self.loss_weight * (l_i + l_i_hv + l_hv)
 
+
+class PriorAlignLoss(nn.Module):
+    def __init__(self, loss_weight=1.0):
+        super().__init__()
+        self.loss_weight = float(loss_weight)
+
+    def forward(self, prior_align_terms, ref_tensor=None):
+        if prior_align_terms is None or len(prior_align_terms) == 0:
+            if ref_tensor is None:
+                return torch.tensor(0.0)
+            return ref_tensor.new_zeros(())
+        vals = [v for v in prior_align_terms if v is not None]
+        if len(vals) == 0:
+            return ref_tensor.new_zeros(()) if ref_tensor is not None else torch.tensor(0.0)
+        return self.loss_weight * torch.stack(vals).mean()
+
+
+class ExpertBalanceLoss(nn.Module):
+    def __init__(self, loss_weight=1.0, eps=1e-6):
+        super().__init__()
+        self.loss_weight = float(loss_weight)
+        self.eps = float(eps)
+
+    def forward(self, router_probs_list, ref_tensor=None):
+        if router_probs_list is None or len(router_probs_list) == 0:
+            if ref_tensor is None:
+                return torch.tensor(0.0)
+            return ref_tensor.new_zeros(())
+        probs = [p for p in router_probs_list if p is not None]
+        if len(probs) == 0:
+            return ref_tensor.new_zeros(()) if ref_tensor is not None else torch.tensor(0.0)
+        probs = torch.cat(probs, dim=0)
+        mean_prob = probs.mean(dim=0)
+        uniform = torch.full_like(mean_prob, 1.0 / mean_prob.numel())
+        loss = F.kl_div((mean_prob + self.eps).log(), uniform, reduction="sum")
+        return self.loss_weight * loss

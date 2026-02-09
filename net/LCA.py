@@ -366,3 +366,292 @@ class WaveFormerI_LCA(nn.Module):
         x = x + self.ffn(self.norm(x), self.norm(y))
         x = x + self.gdfn(self.norm(x))
         return x
+
+
+class PriorAwareCAB(nn.Module):
+    supports_prior_ctx = True
+
+    def __init__(self, dim, num_heads, bias=False, lambda_init=1.0, lambda_max=1.5, eps=1e-6):
+        super().__init__()
+        self.num_heads = num_heads
+        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
+        self.lambda_p = nn.Parameter(torch.full((num_heads, 1, 1), float(lambda_init)))
+        self.lambda_p_min = 0.0
+        self.lambda_p_max = float(lambda_max)
+        self.prior_scale = nn.Parameter(torch.tensor(0.1))
+        self.eps = float(eps)
+
+        self.q = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.q_dwconv = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, groups=dim, bias=bias)
+        self.kv = nn.Conv2d(dim, dim * 2, kernel_size=1, bias=bias)
+        self.kv_dwconv = nn.Conv2d(dim * 2, dim * 2, kernel_size=3, stride=1, padding=1, groups=dim * 2, bias=bias)
+        self.project_out = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+
+    def _compose_prior(self, y, prior_ctx, h, w):
+        if prior_ctx is None:
+            return y, None, None
+        entries = prior_ctx.get("entries", None)
+        if not entries:
+            return y, None, None
+
+        prior_feat = 0.0
+        region_sim = 0.0
+        s_ref = None
+        weight_sum = 0.0
+        b, c, _, _ = y.shape
+
+        for entry in entries:
+            S = entry.get("S", None)
+            V = entry.get("V", None)
+            weight = float(entry.get("weight", 1.0))
+            if S is None or V is None:
+                continue
+            if S.shape[-2:] != (h, w):
+                S = F.interpolate(S, size=(h, w), mode="bilinear", align_corners=True)
+            S = S.clamp_min(0.0)
+            s_flat = S.flatten(2).transpose(1, 2).contiguous()  # (B,N,K)
+            sim = torch.matmul(s_flat, s_flat.transpose(1, 2))  # (B,N,N)
+            region_sim = region_sim + weight * sim
+            token_map = torch.matmul(s_flat, V)  # (B,N,C)
+            token_map = token_map.transpose(1, 2).reshape(b, c, h, w)
+            prior_feat = prior_feat + weight * token_map
+            if s_ref is None:
+                s_ref = weight * s_flat
+            else:
+                s_ref = s_ref + weight * s_flat
+            weight_sum += weight
+
+        if weight_sum <= 0.0:
+            return y, None, None
+
+        prior_feat = prior_feat / weight_sum
+        region_sim = region_sim / weight_sum
+        s_ref = s_ref / weight_sum
+        y = y + torch.tanh(self.prior_scale) * prior_feat
+        return y, region_sim, s_ref
+
+    def forward(self, x, y, prior_ctx=None, return_aux=False):
+        b, c, h, w = x.shape
+
+        y_in, region_sim, s_ref = self._compose_prior(y, prior_ctx, h, w)
+        q = self.q_dwconv(self.q(x))
+        kv = self.kv_dwconv(self.kv(y_in))
+        k, v = kv.chunk(2, dim=1)
+
+        q = rearrange(q, "b (head c) h w -> b head (h w) c", head=self.num_heads)
+        k = rearrange(k, "b (head c) h w -> b head (h w) c", head=self.num_heads)
+        v = rearrange(v, "b (head c) h w -> b head (h w) c", head=self.num_heads)
+
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
+
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
+        if region_sim is not None:
+            with torch.no_grad():
+                self.lambda_p.clamp_(min=float(self.lambda_p_min), max=float(self.lambda_p_max))
+            attn_logits = attn_logits + self.lambda_p.unsqueeze(0) * region_sim.unsqueeze(1)
+        attn = F.softmax(attn_logits, dim=-1)
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, "b head (h w) c -> b (head c) h w", head=self.num_heads, h=h, w=w)
+        out = self.project_out(out)
+
+        if not return_aux:
+            return out
+
+        aux = {}
+        if s_ref is not None:
+            attn_mean = attn.mean(dim=1)  # (B,N,N)
+            pred_region = torch.matmul(attn_mean, s_ref)  # (B,N,K)
+            pred_region = pred_region / (pred_region.sum(dim=-1, keepdim=True) + self.eps)
+            target_region = s_ref / (s_ref.sum(dim=-1, keepdim=True) + self.eps)
+            prior_align = F.kl_div((pred_region + self.eps).log(), target_region, reduction="batchmean")
+            aux["prior_align"] = prior_align
+        return out, aux
+
+
+class _ExpertConv(nn.Module):
+    def __init__(self, dim, kernel_size=3, dilation=1, expansion=2.0, bias=False):
+        super().__init__()
+        hidden = max(int(dim * expansion), dim)
+        padding = ((kernel_size - 1) // 2) * dilation
+        self.net = nn.Sequential(
+            nn.Conv2d(dim, hidden, kernel_size=1, bias=bias),
+            nn.GELU(),
+            nn.Conv2d(hidden, hidden, kernel_size=kernel_size, padding=padding, dilation=dilation, groups=hidden, bias=bias),
+            nn.GELU(),
+            nn.Conv2d(hidden, dim, kernel_size=1, bias=bias),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class DynamicExpertFFN(nn.Module):
+    supports_prior_ctx = True
+
+    def __init__(self, dim, num_experts=3, router_temp=1.0, bias=False):
+        super().__init__()
+        self.num_experts = int(num_experts)
+        self.router_temp_base = max(float(router_temp), 1e-3)
+        self.router_temp = self.router_temp_base
+        self.router_warm_temp = max(1.5, self.router_temp_base)
+        self.progress = 1.0
+
+        expert_cfg = [(3, 1), (5, 1), (3, 3)]
+        self.experts = nn.ModuleList()
+        for i in range(self.num_experts):
+            ksz, dil = expert_cfg[i % len(expert_cfg)]
+            self.experts.append(_ExpertConv(dim, kernel_size=ksz, dilation=dil, bias=bias))
+
+        self.router = nn.Sequential(
+            nn.Linear(dim * 4, dim),
+            nn.GELU(),
+            nn.Linear(dim, self.num_experts),
+        )
+
+    def set_progress(self, progress: float):
+        p = float(max(0.0, min(1.0, progress)))
+        self.progress = p
+        if p < 0.2:
+            ratio = p / 0.2
+            self.router_temp = self.router_warm_temp - (self.router_warm_temp - self.router_temp_base) * ratio
+        else:
+            self.router_temp = self.router_temp_base
+
+    def _prior_token(self, prior_ctx, feat_like):
+        if prior_ctx is None:
+            return torch.zeros_like(feat_like)
+        entries = prior_ctx.get("entries", None)
+        if not entries:
+            return torch.zeros_like(feat_like)
+        token = 0.0
+        weight_sum = 0.0
+        for entry in entries:
+            V = entry.get("V", None)
+            weight = float(entry.get("weight", 1.0))
+            if V is None:
+                continue
+            token = token + weight * V.mean(dim=1)
+            weight_sum += weight
+        if weight_sum <= 0.0:
+            return torch.zeros_like(feat_like)
+        return token / weight_sum
+
+    def forward(self, x, x_ref, y_ref, prior_ctx=None, return_aux=False):
+        gap_z = x.mean(dim=(2, 3))
+        gap_x = x_ref.mean(dim=(2, 3))
+        gap_y = y_ref.mean(dim=(2, 3))
+        gap_p = self._prior_token(prior_ctx, gap_z)
+        router_in = torch.cat([gap_z, gap_x, gap_y, gap_p], dim=1)
+        logits = self.router(router_in) / (self.router_temp + 1e-6)
+        probs = F.softmax(logits, dim=-1)
+
+        expert_outs = [expert(x) for expert in self.experts]
+        expert_outs = torch.stack(expert_outs, dim=1)  # (B,E,C,H,W)
+        mixed = (probs[:, :, None, None, None] * expert_outs).sum(dim=1)
+
+        if not return_aux:
+            return mixed
+        return mixed, {"router_probs": probs}
+
+
+class FreqRefine(nn.Module):
+    def __init__(self, dim, bias=False):
+        super().__init__()
+        self.branch = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=3, padding=3, dilation=3, groups=dim, bias=bias),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, kernel_size=1, bias=bias),
+        )
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, x):
+        return x + torch.tanh(self.gamma) * self.branch(x)
+
+
+class DIEMCrossV2(nn.Module):
+    supports_prior_ctx = True
+
+    def __init__(self, dim, num_heads, num_experts=3, router_temp=1.0, bias=False):
+        super().__init__()
+        self.attn = PriorAwareCAB(dim, num_heads, bias=bias)
+        self.ffn = DynamicExpertFFN(dim, num_experts=num_experts, router_temp=router_temp, bias=bias)
+        self.freq = FreqRefine(dim, bias=bias)
+        self.res_attn = nn.Parameter(torch.full((1, dim, 1, 1), 0.1))
+        self.res_ffn = nn.Parameter(torch.full((1, dim, 1, 1), 0.1))
+
+    def set_progress(self, progress: float):
+        self.ffn.set_progress(progress)
+
+    def forward(self, x, y, prior_ctx=None, return_aux=False):
+        if return_aux:
+            z, attn_aux = self.attn(x, y, prior_ctx=prior_ctx, return_aux=True)
+            ffn_out, ffn_aux = self.ffn(z, x, y, prior_ctx=prior_ctx, return_aux=True)
+        else:
+            z = self.attn(x, y, prior_ctx=prior_ctx, return_aux=False)
+            ffn_out = self.ffn(z, x, y, prior_ctx=prior_ctx, return_aux=False)
+            attn_aux = {}
+            ffn_aux = {}
+
+        fused = x + self.res_attn * z + self.res_ffn * ffn_out
+        out = self.freq(fused)
+
+        if not return_aux:
+            return out
+        aux = {}
+        if "prior_align" in attn_aux:
+            aux["prior_align"] = attn_aux["prior_align"]
+        if "router_probs" in ffn_aux:
+            aux["router_probs"] = ffn_aux["router_probs"]
+        return out, aux
+
+
+class DIEMHV_LCA_V2(nn.Module):
+    supports_prior_ctx = True
+
+    def __init__(self, dim, num_heads, num_experts=3, router_temp=1.0, bias=False):
+        super().__init__()
+        self.gdfn = IEL(dim)
+        self.norm = LayerNorm(dim)
+        self.ffn = DIEMCrossV2(dim, num_heads, num_experts=num_experts, router_temp=router_temp, bias=bias)
+
+    def set_progress(self, progress: float):
+        self.ffn.set_progress(progress)
+
+    def forward(self, x, y, prior_ctx=None, return_aux=False):
+        if return_aux:
+            delta, aux = self.ffn(self.norm(x), self.norm(y), prior_ctx=prior_ctx, return_aux=True)
+        else:
+            delta = self.ffn(self.norm(x), self.norm(y), prior_ctx=prior_ctx, return_aux=False)
+            aux = None
+        x = x + delta
+        x = self.gdfn(self.norm(x))
+        if return_aux:
+            return x, aux
+        return x
+
+
+class DIEMI_LCA_V2(nn.Module):
+    supports_prior_ctx = True
+
+    def __init__(self, dim, num_heads, num_experts=3, router_temp=1.0, bias=False):
+        super().__init__()
+        self.norm = LayerNorm(dim)
+        self.gdfn = IEL(dim)
+        self.ffn = DIEMCrossV2(dim, num_heads, num_experts=num_experts, router_temp=router_temp, bias=bias)
+
+    def set_progress(self, progress: float):
+        self.ffn.set_progress(progress)
+
+    def forward(self, x, y, prior_ctx=None, return_aux=False):
+        if return_aux:
+            delta, aux = self.ffn(self.norm(x), self.norm(y), prior_ctx=prior_ctx, return_aux=True)
+        else:
+            delta = self.ffn(self.norm(x), self.norm(y), prior_ctx=prior_ctx, return_aux=False)
+            aux = None
+        x = x + delta
+        x = x + self.gdfn(self.norm(x))
+        if return_aux:
+            return x, aux
+        return x
