@@ -373,13 +373,15 @@ class PriorAwareCAB(nn.Module):
 
     def __init__(self, dim, num_heads, bias=False, lambda_init=1.0, lambda_max=1.5, eps=1e-6):
         super().__init__()
-        self.num_heads = num_heads
-        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
-        self.lambda_p = nn.Parameter(torch.full((num_heads, 1, 1), float(lambda_init)))
+        self.num_heads = int(num_heads)
+        self.temperature = nn.Parameter(torch.ones(self.num_heads, 1, 1))
+        self.lambda_p = nn.Parameter(torch.full((self.num_heads, 1, 1), float(lambda_init)))
         self.lambda_p_min = 0.0
         self.lambda_p_max = float(lambda_max)
         self.prior_scale = nn.Parameter(torch.tensor(0.1))
         self.eps = float(eps)
+        # Project a pooled prior token into per-head channel gates; used to form a compact (c x c) bias.
+        self.prior_vec_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
 
         self.q = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
         self.q_dwconv = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, groups=dim, bias=bias)
@@ -395,9 +397,9 @@ class PriorAwareCAB(nn.Module):
             return y, None, None
 
         prior_feat = 0.0
-        region_sim = 0.0
-        s_ref = None
+        prior_token = 0.0
         weight_sum = 0.0
+        kept = []
         b, c, _, _ = y.shape
 
         for entry in entries:
@@ -409,64 +411,77 @@ class PriorAwareCAB(nn.Module):
             if S.shape[-2:] != (h, w):
                 S = F.interpolate(S, size=(h, w), mode="bilinear", align_corners=True)
             S = S.clamp_min(0.0)
-            s_flat = S.flatten(2).transpose(1, 2).contiguous()  # (B,N,K)
-            sim = torch.matmul(s_flat, s_flat.transpose(1, 2))  # (B,N,N)
-            region_sim = region_sim + weight * sim
-            token_map = torch.matmul(s_flat, V)  # (B,N,C)
-            token_map = token_map.transpose(1, 2).reshape(b, c, h, w)
-            prior_feat = prior_feat + weight * token_map
-            if s_ref is None:
-                s_ref = weight * s_flat
-            else:
-                s_ref = s_ref + weight * s_flat
-            weight_sum += weight
 
-        if weight_sum <= 0.0:
+            # Prior feature map: sum_k S_k(x) * V_k (region token), shape (B,C,H,W)
+            # Avoid any (B,N,N) intermediate to keep memory bounded.
+            token_map = torch.einsum("bkhw,bkc->bchw", S, V)
+            prior_feat = prior_feat + weight * token_map
+
+            # Pooled prior token for compact channel-bias.
+            prior_token = prior_token + weight * V.mean(dim=1)
+            weight_sum += weight
+            kept.append({"S": S, "V": V, "weight": weight})
+
+        if weight_sum <= 0.0 or len(kept) == 0:
             return y, None, None
 
         prior_feat = prior_feat / weight_sum
-        region_sim = region_sim / weight_sum
-        s_ref = s_ref / weight_sum
+        prior_token = prior_token / weight_sum
         y = y + torch.tanh(self.prior_scale) * prior_feat
-        return y, region_sim, s_ref
+
+        # Build a compact (c x c) bias in channel-attention space (matches CAB behavior).
+        c_per_head = c // self.num_heads
+        token_4d = prior_token.view(b, c, 1, 1)
+        vec = self.prior_vec_proj(token_4d).view(b, self.num_heads, c_per_head)
+        vec = F.normalize(vec, dim=-1)
+        bias = torch.einsum("bhc,bhd->bhcd", vec, vec)
+        return y, bias, kept
 
     def forward(self, x, y, prior_ctx=None, return_aux=False):
         b, c, h, w = x.shape
 
-        y_in, region_sim, s_ref = self._compose_prior(y, prior_ctx, h, w)
+        y_in, prior_bias, kept = self._compose_prior(y, prior_ctx, h, w)
         q = self.q_dwconv(self.q(x))
         kv = self.kv_dwconv(self.kv(y_in))
         k, v = kv.chunk(2, dim=1)
 
-        q = rearrange(q, "b (head c) h w -> b head (h w) c", head=self.num_heads)
-        k = rearrange(k, "b (head c) h w -> b head (h w) c", head=self.num_heads)
-        v = rearrange(v, "b (head c) h w -> b head (h w) c", head=self.num_heads)
+        # Match original CAB: attention along channel tokens (c x c), not spatial tokens (N x N).
+        q = rearrange(q, "b (head c) h w -> b head c (h w)", head=self.num_heads)
+        k = rearrange(k, "b (head c) h w -> b head c (h w)", head=self.num_heads)
+        v = rearrange(v, "b (head c) h w -> b head c (h w)", head=self.num_heads)
 
         q = F.normalize(q, dim=-1)
         k = F.normalize(k, dim=-1)
 
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
-        if region_sim is not None:
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.temperature  # (B,head,c,c)
+        if prior_bias is not None:
             with torch.no_grad():
                 self.lambda_p.clamp_(min=float(self.lambda_p_min), max=float(self.lambda_p_max))
-            attn_logits = attn_logits + self.lambda_p.unsqueeze(0) * region_sim.unsqueeze(1)
+            attn_logits = attn_logits + self.lambda_p.view(1, self.num_heads, 1, 1) * prior_bias
         attn = F.softmax(attn_logits, dim=-1)
 
         out = torch.matmul(attn, v)
-        out = rearrange(out, "b head (h w) c -> b (head c) h w", head=self.num_heads, h=h, w=w)
+        out = rearrange(out, "b head c (h w) -> b (head c) h w", head=self.num_heads, h=h, w=w)
         out = self.project_out(out)
 
         if not return_aux:
             return out
 
         aux = {}
-        if s_ref is not None:
-            attn_mean = attn.mean(dim=1)  # (B,N,N)
-            pred_region = torch.matmul(attn_mean, s_ref)  # (B,N,K)
-            pred_region = pred_region / (pred_region.sum(dim=-1, keepdim=True) + self.eps)
-            target_region = s_ref / (s_ref.sum(dim=-1, keepdim=True) + self.eps)
-            prior_align = F.kl_div((pred_region + self.eps).log(), target_region, reduction="batchmean")
-            aux["prior_align"] = prior_align
+        if kept:
+            # Region-token alignment: pool predicted feature by region masks, match provided region tokens.
+            loss_sum = 0.0
+            w_sum = 0.0
+            for entry in kept:
+                S = entry["S"]  # (B,K,H,W)
+                V = entry["V"]  # (B,K,C)
+                w_e = float(entry.get("weight", 1.0))
+                denom = S.flatten(2).sum(dim=-1, keepdim=True).clamp_min(self.eps)  # (B,K,1)
+                V_pred = torch.einsum("bchw,bkhw->bkc", out, S) / denom
+                loss_sum = loss_sum + w_e * F.smooth_l1_loss(V_pred, V, reduction="mean")
+                w_sum += w_e
+            if w_sum > 0.0:
+                aux["prior_align"] = loss_sum / w_sum
         return out, aux
 
 
