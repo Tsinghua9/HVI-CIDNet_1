@@ -27,32 +27,28 @@ def option():
                         help='front-end stem type; legacy uses use_wtconv_i/use_dwconv_hv')
     parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'diem', 'waveformer'],
                         help='LCA type: cab (default), diem, or waveformer')
-    parser.add_argument('--use_ode_cdem', type=_str2bool, default=False, help='use ODE-FFN inside CDEM for DIEM')
-    parser.add_argument('--ode_window', type=_str2bool, default=True, help='apply ODE in local windows')
-    parser.add_argument('--ode_window_size', type=int, default=8, help='window size for ODE (pixels)')
-    parser.add_argument('--ode_k', type=int, default=8, help='top-k neighbors for ODE')
-    parser.add_argument('--ode_method', type=str, default='rk4', help='odeint method (e.g., rk4, dopri5)')
-    parser.add_argument('--ode_tol', type=float, default=1e-3, help='odeint rtol/atol')
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
     parser.add_argument('--prior_label_dir', type=str, default=None, help='label folder; defaults to <train_root>/label if not set')
-    parser.add_argument('--prior_mode', type=str, default='attn', choices=['gate', 'film', 'attn'], help='how to inject region prior into CIDNet')
+    parser.add_argument('--prior_mode', type=str, default='attn', choices=['gate', 'film', 'attn', 'glib'], help='how to inject region prior into CIDNet')
+    parser.add_argument('--glib_on_i', type=_str2bool, default=True, help='enable GLIB on I branch when prior_mode=glib')
+    parser.add_argument('--glib_on_hv', type=_str2bool, default=False, help='enable GLIB on HV branch when prior_mode=glib')
 
     # region prior hyperparams (for tuning / reproducibility)
     parser.add_argument('--max_regions', type=int, default=32,
                         help='keep top-K regions in label (merge rest to 0)')
     parser.add_argument('--attn_alpha1_init', type=float, default=-2.197225,
-                        help='init alpha for region_attn (a1=sigmoid(alpha1))')
+                        help='(only prior_mode=attn) init alpha for region_attn (a1=sigmoid(alpha1))')
     parser.add_argument('--attn_alpha2_init', type=float, default=-2.197225,
-                        help='init alpha for region_attn2 (a2=sigmoid(alpha2))')
+                        help='(only prior_mode=attn) init alpha for region_attn2 (a2=sigmoid(alpha2))')
     parser.add_argument('--attn_mask_bias_scale1_init', type=float, default=1.0,
-                        help='init mask_bias_scale for region_attn')
+                        help='(only prior_mode=attn) init mask_bias_scale for region_attn')
     parser.add_argument('--attn_mask_bias_scale2_init', type=float, default=1.0,
-                        help='init mask_bias_scale for region_attn2')
+                        help='(only prior_mode=attn) init mask_bias_scale for region_attn2')
     parser.add_argument('--attn_mask_bias_scale1_max', type=float, default=1.0,
-                        help='max clamp for region_attn.mask_bias_scale; set <0 to disable clamp')
+                        help='(only prior_mode=attn) max clamp for region_attn.mask_bias_scale; <0 to disable clamp')
     parser.add_argument('--attn_mask_bias_scale2_max', type=float, default=0.65,
-                        help='max clamp for region_attn2.mask_bias_scale; set <0 to disable clamp')
+                        help='(only prior_mode=attn) max clamp for region_attn2.mask_bias_scale; <0 to disable clamp')
 
 
 
@@ -103,9 +99,13 @@ def option():
     parser.add_argument('--P_weight',  type=float, default=1e-2)
     parser.add_argument('--loss_gtmean_rgb', type=_str2bool, default=False, help='enable GT-Mean L1 loss for RGB branch')
     parser.add_argument('--loss_gtmean_hvi', type=_str2bool, default=False, help='enable GT-Mean L1 loss for HVI branch')
+    parser.add_argument('--gtmean_warmup_ratio', type=float, default=0.3, help='fraction of epochs using GTMean before switching off')
     parser.add_argument('--gtmean_sigma', type=float, default=0.1, help='sigma for GT-Mean loss')
     parser.add_argument('--loss_ccl', type=_str2bool, default=False, help='enable Covariance Correction Loss (CCL)')
     parser.add_argument('--ccl_weight', type=float, default=1.0, help='weight for CCL loss')
+    parser.add_argument('--loss_edge', type=_str2bool, default=True, help='enable EdgeLoss (set False to simplify when using REM)')
+    parser.add_argument('--loss_rem', type=_str2bool, default=False, help='enable Region Exposure Matching (REM) loss')
+    parser.add_argument('--rem_weight', type=float, default=0.1, help='weight for REM loss')
     # parser.add_argument('--HVI_weight', type=float, default=1.0)
     # parser.add_argument('--L1_weight', type=float, default=0)
     # parser.add_argument('--D_weight',  type=float, default=0)

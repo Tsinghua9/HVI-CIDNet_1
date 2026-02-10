@@ -20,6 +20,8 @@ opt = option().parse_args()
 
 if (not opt.use_region_prior) and (opt.prior_label_dir is not None or opt.prior_mode != "gate"):
     print("[warn] prior_mode/prior_label_dir is set but --use_region_prior is False; region prior will NOT be used.")
+if opt.prior_mode == "glib" and not opt.use_region_prior:
+    raise RuntimeError("prior_mode='glib' requires --use_region_prior True (index_map needed).")
 
 def _get_prior_alpha(model, prior_mode: str):
     base = model.module if hasattr(model, "module") else model
@@ -44,6 +46,20 @@ def _get_prior_alpha2(model, prior_mode: str):
     alpha_raw = float(alpha_param.detach().cpu().item())
     alpha_sigmoid = float(torch.sigmoid(alpha_param.detach()).cpu().item())
     return alpha_raw, alpha_sigmoid
+
+def _get_glib_alpha(model, branch: str, stage: int):
+    """
+    branch: 'i' or 'hv'
+    stage: 1..6
+    """
+    base = model.module if hasattr(model, "module") else model
+    name = f"{branch.upper()}_GLIB{stage}"
+    block = getattr(base, name, None)
+    if block is None:
+        return None
+    a_raw = float(block.alpha.detach().cpu().item())
+    a_sig = float(torch.sigmoid(block.alpha.detach()).cpu().item())
+    return a_raw, a_sig
 
 def _get_prior_policy_stats(model):
     base = model.module if hasattr(model, "module") else model
@@ -115,6 +131,7 @@ def _get_prior_attn2_stats(model):
                 stats[key] = val
     return stats or None
 
+
 def seed_torch():
     # seed = random.randint(1, 1000000)
     seed = opt.seed
@@ -141,6 +158,8 @@ def train(epoch):
     pic_last_10 = 0
     train_len = len(training_data_loader)
     iter = 0
+    if opt.loss_rem and not opt.use_region_prior:
+        raise RuntimeError("--loss_rem True requires --use_region_prior True (index_map is needed).")
     torch.autograd.set_detect_anomaly(opt.grad_detect)
     for batch in tqdm(training_data_loader):
         if opt.use_region_prior:
@@ -174,8 +193,9 @@ def train(epoch):
         gt_rgb = im2
         output_hvi = model.HVIT(output_rgb)
         gt_hvi = model.HVIT(gt_rgb)
-        use_gtmean_rgb = opt.loss_gtmean_rgb
-        use_gtmean_hvi = opt.loss_gtmean_hvi
+        warmup_end = int(opt.nEpochs * opt.gtmean_warmup_ratio)
+        use_gtmean_rgb = opt.loss_gtmean_rgb and (epoch <= warmup_end)
+        use_gtmean_hvi = opt.loss_gtmean_hvi and (epoch <= warmup_end)
         if use_gtmean_hvi:
             l1_hvi = opt.L1_weight * GTmean_hvi(output_hvi, gt_hvi)
         else:
@@ -184,12 +204,17 @@ def train(epoch):
             l1_rgb = opt.L1_weight * GTmean_rgb(output_rgb, gt_rgb)
         else:
             l1_rgb = L1_loss(output_rgb, gt_rgb)
-        loss_hvi = l1_hvi + D_loss(output_hvi, gt_hvi) + E_loss(output_hvi, gt_hvi) + opt.P_weight * P_loss(output_hvi, gt_hvi)[0]
-        loss_rgb = l1_rgb + D_loss(output_rgb, gt_rgb) + E_loss(output_rgb, gt_rgb) + opt.P_weight * P_loss(output_rgb, gt_rgb)[0]
+        edge_hvi = E_loss(output_hvi, gt_hvi) if opt.loss_edge else 0
+        edge_rgb = E_loss(output_rgb, gt_rgb) if opt.loss_edge else 0
+        loss_hvi = l1_hvi + D_loss(output_hvi, gt_hvi) + edge_hvi + opt.P_weight * P_loss(output_hvi, gt_hvi)[0]
+        loss_rgb = l1_rgb + D_loss(output_rgb, gt_rgb) + edge_rgb + opt.P_weight * P_loss(output_rgb, gt_rgb)[0]
         loss = loss_rgb + opt.HVI_weight * loss_hvi
         if opt.loss_ccl:
             loss_ccl = CCL_loss(output_hvi, gt_hvi)
             loss = loss + opt.ccl_weight * loss_ccl
+        if opt.loss_rem:
+            loss_rem = REM_loss(output_rgb, output_hvi, gt_rgb, gt_hvi, index_map)
+            loss = loss + opt.rem_weight * loss_rem
         iter += 1
         
         if opt.grad_clip:
@@ -292,13 +317,15 @@ def build_model():
     model = CIDNet(use_wtconv_i=opt.use_wtconv_i,
                    use_dwconv_hv=opt.use_dwconv_hv,
                    fe_type=opt.fe_type,
-                   use_ode_cdem=opt.use_ode_cdem,
-                   ode_window=opt.ode_window,
-                   ode_window_size=opt.ode_window_size,
-                   ode_k=opt.ode_k,
-                   ode_method=opt.ode_method,
-                   ode_tol=opt.ode_tol,
-                   lca_type=opt.lca_type).cuda()
+                   attn_alpha1_init=opt.attn_alpha1_init,
+                   attn_alpha2_init=opt.attn_alpha2_init,
+                   attn_mask_bias_scale1_init=opt.attn_mask_bias_scale1_init,
+                   attn_mask_bias_scale2_init=opt.attn_mask_bias_scale2_init,
+                   attn_mask_bias_scale1_max=opt.attn_mask_bias_scale1_max,
+                   attn_mask_bias_scale2_max=opt.attn_mask_bias_scale2_max,
+                   lca_type=opt.lca_type,
+                   glib_on_i=opt.glib_on_i,
+                   glib_on_hv=opt.glib_on_hv).cuda()
     if opt.start_epoch > 0:
         pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
         model.load_state_dict(torch.load(pth, map_location=lambda storage, loc: storage))
@@ -335,7 +362,8 @@ def init_loss():
     CCL_loss = CCLLoss(loss_weight=1.0).cuda()
     GTmean_rgb = GTMeanLoss(sigma=opt.gtmean_sigma, mode="luma").cuda()
     GTmean_hvi = GTMeanLoss(sigma=opt.gtmean_sigma, mode="channel2").cuda()
-    return L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi
+    REM_loss = RegionExposureLoss().cuda()
+    return L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi, REM_loss
 
 if __name__ == '__main__':  
     
@@ -363,7 +391,7 @@ if __name__ == '__main__':
                 base.region_attn2.alpha.data.fill_(float(opt.attn_alpha2_init))
                 base.region_attn2.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale2_init))
     optimizer,scheduler = make_scheduler()
-    L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi = init_loss()
+    L1_loss, P_loss, E_loss, D_loss, CCL_loss, GTmean_rgb, GTmean_hvi, REM_loss = init_loss()
     
     '''
     train
@@ -395,19 +423,19 @@ if __name__ == '__main__':
         f.write(f"P_weight: {opt.P_weight}\n")
         f.write(f"loss_gtmean_rgb: {opt.loss_gtmean_rgb}\n")
         f.write(f"loss_gtmean_hvi: {opt.loss_gtmean_hvi}\n")
+        f.write(f"gtmean_warmup_ratio: {opt.gtmean_warmup_ratio}\n")
         f.write(f"gtmean_sigma: {opt.gtmean_sigma}\n")
+        f.write(f"loss_edge: {opt.loss_edge}\n")
+        f.write(f"loss_rem: {opt.loss_rem}\n")
+        f.write(f"rem_weight: {opt.rem_weight}\n")
         f.write(f"use_region_prior: {opt.use_region_prior}\n")
         f.write(f"prior_mode: {opt.prior_mode}\n")
+        f.write(f"glib_on_i: {opt.glib_on_i}\n")
+        f.write(f"glib_on_hv: {opt.glib_on_hv}\n")
         f.write(f"use_wtconv_i: {opt.use_wtconv_i}\n")
         f.write(f"use_dwconv_hv: {opt.use_dwconv_hv}\n")
         f.write(f"fe_type: {opt.fe_type}\n")
         f.write(f"lca_type: {opt.lca_type}\n")
-        f.write(f"use_ode_cdem: {opt.use_ode_cdem}\n")
-        f.write(f"ode_window: {opt.ode_window}\n")
-        f.write(f"ode_window_size: {opt.ode_window_size}\n")
-        f.write(f"ode_k: {opt.ode_k}\n")
-        f.write(f"ode_method: {opt.ode_method}\n")
-        f.write(f"ode_tol: {opt.ode_tol}\n")
         f.write(f"loss_ccl: {opt.loss_ccl}\n")
         f.write(f"ccl_weight: {opt.ccl_weight}\n")
         f.write(f"prior_label_dir: {opt.prior_label_dir}\n")
@@ -418,6 +446,7 @@ if __name__ == '__main__':
         f.write(f"attn_mask_bias_scale2_init: {opt.attn_mask_bias_scale2_init}\n")
         f.write(f"attn_mask_bias_scale1_max: {opt.attn_mask_bias_scale1_max}\n")
         f.write(f"attn_mask_bias_scale2_max: {opt.attn_mask_bias_scale2_max}\n")
+        f.write(f"attn_params_effective: {opt.prior_mode == 'attn'} (ignored when prior_mode!=attn)\n")
         # f.write("| Epochs | PSNR | SSIM | LPIPS |\n")
         # f.write("|----------------------|----------------------|----------------------|----------------------|\n")
         f.write("| Epoch | PSNR | SSIM | LPIPS | mode | alpha1 | a1 | d1 | eff1 | mb1 | alpha2 | a2 | d2 | eff2 | mb2 |\n")
@@ -428,36 +457,49 @@ if __name__ == '__main__':
         epoch_loss, pic_num = train(epoch)
         scheduler.step()
         if opt.use_region_prior:
-            alpha_raw, alpha_sigmoid = _get_prior_alpha(model, opt.prior_mode)
-            alpha2_raw, alpha2_sigmoid = _get_prior_alpha2(model, opt.prior_mode)
-            msg = (f"[prior] mode={opt.prior_mode}"
-                   f" alpha1={alpha_raw:.6f} a1={alpha_sigmoid:.6f}"
-                   f" | alpha2={alpha2_raw:.6f} a2={alpha2_sigmoid:.6f}")
-            if opt.prior_mode == "film":
-                stats = _get_prior_film_stats(model)
-                if stats:
-                    msg += (f" | film1:delta_ratio={stats.get('last_delta_ratio', 0.0):.6f}"
-                            f" gamma1_used-1(std)={stats.get('last_gamma_dev_std', 0.0):.6f}"
-                            f" beta1_used(std)={stats.get('last_beta_used_std', 0.0):.6f}")
-                else:
-                    stats = _get_prior_policy_stats(model)
+            if opt.prior_mode == "glib":
+                glib1 = _get_glib_alpha(model, "i", 1)
+                glib2 = _get_glib_alpha(model, "i", 2)
+                a1 = glib1[1] if glib1 else 0.0
+                a2 = glib2[1] if glib2 else 0.0
+                msg = f"[prior] mode=glib I: a1={a1:.6f} a2={a2:.6f}"
+                if opt.glib_on_hv:
+                    hv1 = _get_glib_alpha(model, "hv", 1)
+                    hv2 = _get_glib_alpha(model, "hv", 2)
+                    h1 = hv1[1] if hv1 else 0.0
+                    h2 = hv2[1] if hv2 else 0.0
+                    msg += f" | HV: a1={h1:.6f} a2={h2:.6f}"
+            else:
+                alpha_raw, alpha_sigmoid = _get_prior_alpha(model, opt.prior_mode)
+                alpha2_raw, alpha2_sigmoid = _get_prior_alpha2(model, opt.prior_mode)
+                msg = (f"[prior] mode={opt.prior_mode}"
+                       f" alpha1={alpha_raw:.6f} a1={alpha_sigmoid:.6f}"
+                       f" | alpha2={alpha2_raw:.6f} a2={alpha2_sigmoid:.6f}")
+                if opt.prior_mode == "film":
+                    stats = _get_prior_film_stats(model)
                     if stats:
-                        msg += (f" | gamma_raw(mean,std)=({stats.get('last_gamma_mean', 0.0):.6f},{stats.get('last_gamma_std', 0.0):.6f})"
-                                f" beta_raw(mean,std)=({stats.get('last_beta_mean', 0.0):.6f},{stats.get('last_beta_std', 0.0):.6f})")
-                stats2 = _get_prior_film2_stats(model)
-                if stats2:
-                    msg += f" | film2:delta_ratio={stats2.get('last_delta_ratio', 0.0):.6f}"
-            elif opt.prior_mode == "attn":
-                stats = _get_prior_attn_stats(model)
-                if stats:
-                    a1 = alpha_sigmoid
-                    d1 = float(stats.get("last_delta_ratio", 0.0))
-                    msg += (f" | attn1:delta_ratio={d1:.6f} eff1={a1*d1:.6f} mb1={float(stats.get('mask_bias_scale', 0.0)):.3f}")
-                stats2 = _get_prior_attn2_stats(model)
-                if stats2:
-                    a2 = alpha2_sigmoid
-                    d2 = float(stats2.get("last_delta_ratio", 0.0))
-                    msg += f" | attn2:delta_ratio={d2:.6f} eff2={a2*d2:.6f} mb2={float(stats2.get('mask_bias_scale', 0.0)):.3f}"
+                        msg += (f" | film1:delta_ratio={stats.get('last_delta_ratio', 0.0):.6f}"
+                                f" gamma1_used-1(std)={stats.get('last_gamma_dev_std', 0.0):.6f}"
+                                f" beta1_used(std)={stats.get('last_beta_used_std', 0.0):.6f}")
+                    else:
+                        stats = _get_prior_policy_stats(model)
+                        if stats:
+                            msg += (f" | gamma_raw(mean,std)=({stats.get('last_gamma_mean', 0.0):.6f},{stats.get('last_gamma_std', 0.0):.6f})"
+                                    f" beta_raw(mean,std)=({stats.get('last_beta_mean', 0.0):.6f},{stats.get('last_beta_std', 0.0):.6f})")
+                    stats2 = _get_prior_film2_stats(model)
+                    if stats2:
+                        msg += f" | film2:delta_ratio={stats2.get('last_delta_ratio', 0.0):.6f}"
+                elif opt.prior_mode == "attn":
+                    stats = _get_prior_attn_stats(model)
+                    if stats:
+                        a1 = alpha_sigmoid
+                        d1 = float(stats.get("last_delta_ratio", 0.0))
+                        msg += (f" | attn1:delta_ratio={d1:.6f} eff1={a1*d1:.6f} mb1={float(stats.get('mask_bias_scale', 0.0)):.3f}")
+                    stats2 = _get_prior_attn2_stats(model)
+                    if stats2:
+                        a2 = alpha2_sigmoid
+                        d2 = float(stats2.get("last_delta_ratio", 0.0))
+                        msg += f" | attn2:delta_ratio={d2:.6f} eff2={a2*d2:.6f} mb2={float(stats2.get('mask_bias_scale', 0.0)):.3f}"
             print(msg)
         
         if epoch % opt.snapshots == 0:
@@ -525,24 +567,23 @@ if __name__ == '__main__':
             if opt.use_region_prior and opt.prior_mode == "attn":
                 stats1 = _get_prior_attn_stats(model) or {}
                 stats2 = _get_prior_attn2_stats(model) or {}
-                alpha_raw, alpha_sigmoid = _get_prior_alpha(model, opt.prior_mode)
-                alpha2_raw, alpha2_sigmoid = _get_prior_alpha2(model, opt.prior_mode)
-
+                alpha_raw, a1 = _get_prior_alpha(model, opt.prior_mode)
+                alpha2_raw, a2 = _get_prior_alpha2(model, opt.prior_mode)
                 d1 = float(stats1.get("last_delta_ratio", 0.0) or 0.0)
                 d2 = float(stats2.get("last_delta_ratio", 0.0) or 0.0)
                 mb1 = float(stats1.get("mask_bias_scale", 0.0) or 0.0)
                 mb2 = float(stats2.get("mask_bias_scale", 0.0) or 0.0)
 
                 alpha1_s = f"{alpha_raw:.6f}"
-                a1_s     = f"{alpha_sigmoid:.6f}"
+                a1_s     = f"{a1:.6f}"
                 d1_s     = f"{d1:.6f}"
-                eff1_s   = f"{(alpha_sigmoid*d1):.6f}"
+                eff1_s   = f"{(a1*d1):.6f}"
                 mb1_s    = f"{mb1:.3f}"
 
                 alpha2_s = f"{alpha2_raw:.6f}"
-                a2_s     = f"{alpha2_sigmoid:.6f}"
+                a2_s     = f"{a2:.6f}"
                 d2_s     = f"{d2:.6f}"
-                eff2_s   = f"{(alpha2_sigmoid*d2):.6f}"
+                eff2_s   = f"{(a2*d2):.6f}"
                 mb2_s    = f"{mb2:.3f}"
 
             with open(log_path, "a") as f:

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 class SoftRegionMask(nn.Module):
@@ -294,4 +295,95 @@ class RegionFiLM(nn.Module):
                 base_rms = torch.sqrt(torch.mean(base * base) + 1e-12)
                 self.last_delta_ratio = float((delta_rms / base_rms).detach().cpu().item())
 
+        return out
+
+
+# -------------------------------------------------------------
+# Global-Local Interaction Block (GLIB)
+# -------------------------------------------------------------
+class GlobalLocalInteractionBlock(nn.Module):
+    """
+    Global ↔ Region dual interaction + region-wise FiLM modulation.
+
+    Differences vs original DIEM prior branch:
+      1) uses global token (GAP of feature) to talk with region tokens (soft mask).
+      2) produces FiLM gamma/beta from *updated* region tokens (not raw mask stats).
+      3) modulation is near-identity via tanh + learnable alpha gate (no mask-logit reuse).
+    """
+
+    def __init__(self, channels: int, init_alpha: float = -1.386294, init_logit_scale: float = 1.0):
+        super().__init__()
+        self.channels = channels
+        self.soft_mask = SoftRegionMask(init_logit_scale=init_logit_scale)
+        self.pool = RegionPooling()
+
+        # global token projections
+        self.q_g = nn.Linear(channels, channels)
+        self.k_g = nn.Linear(channels, channels)
+        self.v_g = nn.Linear(channels, channels)
+
+        # region token projections
+        self.q_r = nn.Linear(channels, channels)
+        self.k_r = nn.Linear(channels, channels)
+        self.v_r = nn.Linear(channels, channels)
+
+        # output projections
+        self.proj_g = nn.Linear(channels, channels)
+        self.policy = RegionPolicyMLP(channels)
+
+        # residual gate (near-identity at init)
+        self.alpha = nn.Parameter(torch.tensor(float(init_alpha)))  # sigmoid(-1.386)≈0.2
+
+        # init: keep stable
+        for m in [self.q_g, self.k_g, self.v_g, self.q_r, self.k_r, self.v_r, self.proj_g]:
+            nn.init.xavier_uniform_(m.weight)
+            nn.init.zeros_(m.bias)
+
+        last = self.proj_g
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+
+    def forward(self, feat: torch.Tensor, index_map: torch.Tensor) -> torch.Tensor:
+        """
+        feat: (B,C,H,W)
+        index_map: (B,H0,W0) int64
+        """
+        b, c, h, w = feat.shape
+        device = feat.device
+        S = self.soft_mask(index_map, target_hw=(h, w))  # (B,K,H,W)
+        V = self.pool(feat, S)                           # (B,K,C)
+        g = feat.mean(dim=(2, 3))                        # (B,C)
+
+        # global attends regions (1×K) -> update global
+        qg = self.q_g(g)                                 # (B,C)
+        kr = self.k_r(V)                                 # (B,K,C)
+        vr = self.v_r(V)                                 # (B,K,C)
+        scale = math.sqrt(float(c))
+        attn_gr = torch.softmax(torch.einsum("bc,bkc->bk", qg, kr) / scale, dim=1)  # (B,K)
+        g_ctx = torch.einsum("bk,bkc->bc", attn_gr, vr)                              # (B,C)
+        g_upd = g + self.proj_g(g_ctx)
+
+        # regions attend global (K×1) -> update regions
+        qr = self.q_r(V)                                  # (B,K,C)
+        kg = self.k_g(g_upd).unsqueeze(1)                 # (B,1,C)
+        vg = self.v_g(g_upd).unsqueeze(1)                 # (B,1,C)
+        attn_rg = torch.softmax((qr * kg).sum(dim=-1) / scale, dim=1)  # (B,K)
+        attn_rg = attn_rg.unsqueeze(-1)                                                        # (B,K,1)
+        V_upd = V + attn_rg * vg                          # broadcast vg
+
+        gamma, beta = self.policy(V_upd)                  # (B,K,C) each
+        gamma_map = torch.einsum("bkc,bkhw->bchw", torch.tanh(gamma), S)
+        beta_map = torch.einsum("bkc,bkhw->bchw", torch.tanh(beta), S)
+
+        mod = feat * (1.0 + gamma_map) + beta_map
+        a = torch.sigmoid(self.alpha)
+        out = feat + a * (mod - feat)
+
+        if self.training:
+            with torch.no_grad():
+                self.last_a = float(a.detach().cpu().item())
+                self.last_gamma_mean = float(gamma.mean().detach().cpu().item())
+                self.last_gamma_std = float(gamma.std(unbiased=False).detach().cpu().item())
+                self.last_beta_mean = float(beta.mean().detach().cpu().item())
+                self.last_beta_std = float(beta.std(unbiased=False).detach().cpu().item())
         return out

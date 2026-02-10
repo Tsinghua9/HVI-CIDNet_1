@@ -4,13 +4,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from net.transformer_utils import *
 from net.waveformer_ops import Wave2D
-try:
-    from torchdiffeq import odeint_adjoint as _odeint
-except Exception:
-    try:
-        from torchdiffeq import odeint as _odeint
-    except Exception:
-        _odeint = None
 
 # Cross Attention Block
 class CAB(nn.Module):
@@ -112,89 +105,6 @@ class PixelAttention(nn.Module):
         return self.sigmoid(self.conv(torch.cat([x, y], dim=1)))
 
 
-class ODEFunc(nn.Module):
-    def __init__(self, func):
-        super().__init__()
-        self.func = func
-
-    def forward(self, t, x):
-        return self.func(x)
-
-
-class Beltrami(nn.Module):
-    def __init__(self, dim, k=8):
-        super().__init__()
-        self.fc = nn.Linear(dim, dim * 2)
-        self.k = k
-
-    def forward(self, x):
-        if x.dim() != 3:
-            raise ValueError(f"Beltrami expects 3D tokens, got {x.dim()}D")
-        b, n, c = x.shape
-        feat_pos = self.fc(x)
-        feat = feat_pos[:, :, :c]
-        pos = feat_pos[:, :, c:]
-        pos = F.normalize(pos, p=2, dim=-1)
-        sim = pos @ pos.transpose(-1, -2)
-        k = min(self.k, n)
-        topksim, topkid = torch.topk(sim, k=k, dim=-1)
-        topkid = topkid.flatten(1)
-        topkfeat = torch.gather(feat, dim=1, index=topkid.unsqueeze(-1).expand(-1, -1, c))
-        topkfeat = topkfeat.view(b, n, k, c)
-        attn = topksim.softmax(dim=-1)
-        return (attn.unsqueeze(-1) * topkfeat).sum(dim=-2)
-
-
-class BeltramiODE(nn.Module):
-    def __init__(self, dim, k=8, method="rk4", tol=1e-3):
-        super().__init__()
-        self.odefunc = ODEFunc(Beltrami(dim=dim, k=k))
-        self.method = method
-        self.tol = tol
-
-    def forward(self, x):
-        if _odeint is None:
-            raise RuntimeError("torchdiffeq is required for ODE; please install torchdiffeq.")
-        t = x.new_tensor([0.0, 1.0])
-        out = _odeint(self.odefunc, x, t, method=self.method, rtol=self.tol, atol=self.tol)
-        return out[-1]
-
-
-class TokenODE(nn.Module):
-    def __init__(self, ode):
-        super().__init__()
-        self.ode = ode
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-        x = x.flatten(2).transpose(1, 2)
-        x = self.ode(x)
-        return x.transpose(1, 2).view(b, c, h, w)
-
-
-class WindowODE(nn.Module):
-    def __init__(self, ode, window_size=8):
-        super().__init__()
-        self.ode = ode
-        self.window_size = window_size
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-        ws = self.window_size
-        pad_h = (ws - h % ws) % ws
-        pad_w = (ws - w % ws) % ws
-        if pad_h or pad_w:
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
-        h_pad, w_pad = x.shape[-2:]
-        x = x.view(b, c, h_pad // ws, ws, w_pad // ws, ws)
-        x = x.permute(0, 2, 4, 3, 5, 1).contiguous()
-        x = x.view(-1, ws * ws, c)
-        x = self.ode(x)
-        x = x.view(b, h_pad // ws, w_pad // ws, ws, ws, c)
-        x = x.permute(0, 5, 1, 3, 2, 4).contiguous()
-        x = x.view(b, c, h_pad, w_pad)
-        return x[:, :, :h, :w]
-
 
 class MAFM(nn.Module):
     def __init__(self, dim, reduction=4, bias=False):
@@ -247,7 +157,7 @@ class MFEM(nn.Module):
 
 
 class CDEM(nn.Module):
-    def __init__(self, dim, num_heads, ffn_expansion=2.0, bias=False, ode_cfg=None):
+    def __init__(self, dim, num_heads, ffn_expansion=2.0, bias=False):
         super().__init__()
         self.attn = CAB(dim, num_heads, bias=bias)
         hidden = max(int(dim * ffn_expansion), dim)
@@ -256,19 +166,6 @@ class CDEM(nn.Module):
             nn.GELU(),
             nn.Conv2d(hidden, dim, kernel_size=1, bias=bias),
         )
-        self.use_ode = bool(ode_cfg and ode_cfg.get("enabled"))
-        self.ode = None
-        if self.use_ode:
-            ode_block = BeltramiODE(
-                dim=dim,
-                k=int(ode_cfg.get("k", 8)),
-                method=str(ode_cfg.get("method", "rk4")),
-                tol=float(ode_cfg.get("tol", 1e-3)),
-            )
-            if bool(ode_cfg.get("window", False)):
-                self.ode = WindowODE(ode_block, window_size=int(ode_cfg.get("window_size", 8)))
-            else:
-                self.ode = TokenODE(ode_block)
         self.mfem = MFEM(dim, bias=bias)
         self.alpha = nn.Parameter(torch.ones(1, dim, 1, 1))
         self.beta = nn.Parameter(torch.ones(1, dim, 1, 1))
@@ -277,19 +174,16 @@ class CDEM(nn.Module):
 
     def forward(self, x, y):
         z = self.attn(x, y)
-        if self.use_ode:
-            z_hat = self.lam * self.ode(self.alpha * z + self.beta * y) + self.mu * z
-        else:
-            z_hat = self.lam * self.ffn(self.alpha * z + self.beta * y) + self.mu * z
+        z_hat = self.lam * self.ffn(self.alpha * z + self.beta * y) + self.mu * z
         fused = x + z_hat
         return self.mfem(fused) + fused
 
 
 class DIEMCross(nn.Module):
-    def __init__(self, dim, num_heads, bias=False, ode_cfg=None):
+    def __init__(self, dim, num_heads, bias=False):
         super().__init__()
         self.mafm1 = MAFM(dim, bias=bias)
-        self.cdem = CDEM(dim, num_heads, bias=bias, ode_cfg=ode_cfg)
+        self.cdem = CDEM(dim, num_heads, bias=bias)
         self.mafm2 = MAFM(dim, bias=bias)
 
     def forward(self, x, y):
@@ -299,11 +193,11 @@ class DIEMCross(nn.Module):
 
 
 class DIEMHV_LCA(nn.Module):
-    def __init__(self, dim, num_heads, bias=False, ode_cfg=None):
+    def __init__(self, dim, num_heads, bias=False):
         super().__init__()
         self.gdfn = IEL(dim)
         self.norm = LayerNorm(dim)
-        self.ffn = DIEMCross(dim, num_heads, bias=bias, ode_cfg=ode_cfg)
+        self.ffn = DIEMCross(dim, num_heads, bias=bias)
 
     def forward(self, x, y):
         x = x + self.ffn(self.norm(x), self.norm(y))
@@ -312,11 +206,11 @@ class DIEMHV_LCA(nn.Module):
 
 
 class DIEMI_LCA(nn.Module):
-    def __init__(self, dim, num_heads, bias=False, ode_cfg=None):
+    def __init__(self, dim, num_heads, bias=False):
         super().__init__()
         self.norm = LayerNorm(dim)
         self.gdfn = IEL(dim)
-        self.ffn = DIEMCross(dim, num_heads, bias=bias, ode_cfg=ode_cfg)
+        self.ffn = DIEMCross(dim, num_heads, bias=bias)
 
     def forward(self, x, y):
         x = x + self.ffn(self.norm(x), self.norm(y))

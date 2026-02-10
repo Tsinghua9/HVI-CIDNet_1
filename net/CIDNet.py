@@ -4,11 +4,26 @@ from net.HVI_transform import RGB_HVI
 from net.transformer_utils import *
 from net.LCA import *
 from net.wtconv import hv_fe, i_fe
-from net.prior_modules import SoftRegionMask, RegionPooling, RegionPolicyMLP, RegionFiLM, RegionCrossAttention, BoundaryMap, StructureGate
+from net.prior_modules import (
+    SoftRegionMask,
+    RegionPooling,
+    RegionPolicyMLP,
+    RegionFiLM,
+    RegionCrossAttention,
+    BoundaryMap,
+    StructureGate,
+    GlobalLocalInteractionBlock,
+)
 from huggingface_hub import PyTorchModelHubMixin
 
 
 class CIDNet(nn.Module, PyTorchModelHubMixin):
+    """
+    CIDNet with dual-branch HV/I enc-dec, DIEM LCAs, and optional GLIB prior injection.
+    GLIB differences:
+      - 全尺度插入：I/HV 分支各 6 处 (enc2/3/4，dec3/2/1)，由 glib_on_i / glib_on_hv 控制。
+      - prior_mode=glib 时禁用 film/attn/gate 注入，改用 global↔region 双向交互 + 区域 FiLM 调制。
+    """
     def __init__(self,
                  channels=[36, 36, 72, 144],  # 每个阶段的通道数（从浅到深）
                  heads=[1, 2, 4, 8],  # 每个阶段的多头注意力头数
@@ -16,13 +31,15 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  use_wtconv_i=True,
                  use_dwconv_hv=False,
                  fe_type='legacy',
-                 use_ode_cdem=False,
-                 ode_window=True,
-                 ode_window_size=8,
-                 ode_k=8,
-                 ode_method="rk4",
-                 ode_tol=1e-3,
-                 lca_type='cab'):
+                 attn_alpha1_init=-2.197225,
+                 attn_alpha2_init=-2.197225,
+                 attn_mask_bias_scale1_init=1.0,
+                 attn_mask_bias_scale2_init=1.0,
+                 attn_mask_bias_scale1_max=1.0,
+                 attn_mask_bias_scale2_max=0.65,
+                 lca_type='cab',
+                 glib_on_i: bool = True,
+                 glib_on_hv: bool = False):
         super(CIDNet, self).__init__()
 
         # 解包通道数和 head 数量，方便后面使用
@@ -87,53 +104,48 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         if lca_type == 'cab':
             hv_lca = HV_LCA
             i_lca = I_LCA
-            ode_cfg = None
         elif lca_type == 'diem':
             hv_lca = DIEMHV_LCA
             i_lca = DIEMI_LCA
-            ode_cfg = {
-                "enabled": bool(use_ode_cdem),
-                "window": bool(ode_window),
-                "window_size": int(ode_window_size),
-                "k": int(ode_k),
-                "method": str(ode_method),
-                "tol": float(ode_tol),
-            }
         elif lca_type == 'waveformer':
             hv_lca = WaveFormerHV_LCA
             i_lca = WaveFormerI_LCA
-            ode_cfg = None
         else:
             raise ValueError(f"Unknown lca_type: {lca_type}")
 
-        if ode_cfg is None:
-            self.HV_LCA1 = hv_lca(ch2, head2)
-            self.HV_LCA2 = hv_lca(ch3, head3)
-            self.HV_LCA3 = hv_lca(ch4, head4)
-            self.HV_LCA4 = hv_lca(ch4, head4)
-            self.HV_LCA5 = hv_lca(ch3, head3)
-            self.HV_LCA6 = hv_lca(ch2, head2)
+        def _build_lca(cls, ch, heads):
+            return cls(ch, heads)
 
-            self.I_LCA1 = i_lca(ch2, head2)
-            self.I_LCA2 = i_lca(ch3, head3)
-            self.I_LCA3 = i_lca(ch4, head4)
-            self.I_LCA4 = i_lca(ch4, head4)
-            self.I_LCA5 = i_lca(ch3, head3)
-            self.I_LCA6 = i_lca(ch2, head2)
-        else:
-            self.HV_LCA1 = hv_lca(ch2, head2, ode_cfg=ode_cfg)
-            self.HV_LCA2 = hv_lca(ch3, head3, ode_cfg=ode_cfg)
-            self.HV_LCA3 = hv_lca(ch4, head4, ode_cfg=ode_cfg)
-            self.HV_LCA4 = hv_lca(ch4, head4, ode_cfg=ode_cfg)
-            self.HV_LCA5 = hv_lca(ch3, head3, ode_cfg=ode_cfg)
-            self.HV_LCA6 = hv_lca(ch2, head2, ode_cfg=ode_cfg)
+        self.HV_LCA1 = _build_lca(hv_lca, ch2, head2)
+        self.HV_LCA2 = _build_lca(hv_lca, ch3, head3)
+        self.HV_LCA3 = _build_lca(hv_lca, ch4, head4)
+        self.HV_LCA4 = _build_lca(hv_lca, ch4, head4)
+        self.HV_LCA5 = _build_lca(hv_lca, ch3, head3)
+        self.HV_LCA6 = _build_lca(hv_lca, ch2, head2)
 
-            self.I_LCA1 = i_lca(ch2, head2, ode_cfg=ode_cfg)
-            self.I_LCA2 = i_lca(ch3, head3, ode_cfg=ode_cfg)
-            self.I_LCA3 = i_lca(ch4, head4, ode_cfg=ode_cfg)
-            self.I_LCA4 = i_lca(ch4, head4, ode_cfg=ode_cfg)
-            self.I_LCA5 = i_lca(ch3, head3, ode_cfg=ode_cfg)
-            self.I_LCA6 = i_lca(ch2, head2, ode_cfg=ode_cfg)
+        self.I_LCA1 = _build_lca(i_lca, ch2, head2)
+        self.I_LCA2 = _build_lca(i_lca, ch3, head3)
+        self.I_LCA3 = _build_lca(i_lca, ch4, head4)
+        self.I_LCA4 = _build_lca(i_lca, ch4, head4)
+        self.I_LCA5 = _build_lca(i_lca, ch3, head3)
+        self.I_LCA6 = _build_lca(i_lca, ch2, head2)
+
+        # GLIB modules (per-scale, not shared)
+        self.glib_on_i = glib_on_i
+        self.glib_on_hv = glib_on_hv
+        self.I_GLIB1 = GlobalLocalInteractionBlock(ch2)
+        self.I_GLIB2 = GlobalLocalInteractionBlock(ch4)
+        self.I_GLIB3 = GlobalLocalInteractionBlock(ch4)
+        self.I_GLIB4 = GlobalLocalInteractionBlock(ch3)
+        self.I_GLIB5 = GlobalLocalInteractionBlock(ch2)
+        self.I_GLIB6 = GlobalLocalInteractionBlock(ch1)
+
+        self.HV_GLIB1 = GlobalLocalInteractionBlock(ch2)
+        self.HV_GLIB2 = GlobalLocalInteractionBlock(ch4)
+        self.HV_GLIB3 = GlobalLocalInteractionBlock(ch4)
+        self.HV_GLIB4 = GlobalLocalInteractionBlock(ch3)
+        self.HV_GLIB5 = GlobalLocalInteractionBlock(ch2)
+        self.HV_GLIB6 = GlobalLocalInteractionBlock(ch1)
 
         self.trans = RGB_HVI()
 
@@ -163,9 +175,14 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         self.structure_gate2 = StructureGate(ch4)
 
     def forward(self, x, index_map=None, prior_mode: str = 'gate'):
+        if prior_mode == 'glib' and index_map is None:
+            raise RuntimeError("prior_mode='glib' requires index_map (use_region_prior=True).")
         dtypes = x.dtype
         hvi = self.trans.HVIT(x)  # [B, 3, H, W] -> [H,V,I]
         i = hvi[:, 2, :, :].unsqueeze(1).to(dtypes)  # 抽出 I 通道给 I 分支
+
+        def lca_call(module, a, b):
+            return module(a, b)
         # low
         # Intensity分支
         i_enc0 = self.IE_block0(i)
@@ -177,9 +194,9 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         i_jump0 = i_enc0
         hv_jump0 = hv_0
 
-        i_enc2 = self.I_LCA1(i_enc1, hv_1)
+        i_enc2 = lca_call(self.I_LCA1, i_enc1, hv_1)
         # Apply region prior after first cross-branch interaction (safer than pre-LCA)
-        if index_map is not None:
+        if index_map is not None and prior_mode != 'glib':
             target_hw = i_enc2.shape[-2:]
             if prior_mode == 'film':
                 S = self.soft_mask(index_map, target_hw=target_hw)
@@ -193,14 +210,19 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             else:
                 A = self.boundary_map(index_map, target_hw=target_hw)
                 i_enc2 = self.structure_gate(i_enc2, A)
-        hv_2 = self.HV_LCA1(hv_1, i_enc1)
+        hv_2 = lca_call(self.HV_LCA1, hv_1, i_enc1)
         v_jump1 = i_enc2
         hv_jump1 = hv_2
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_i:
+            i_enc2 = self.I_GLIB1(i_enc2, index_map)
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
+            hv_2 = self.HV_GLIB1(hv_2, index_map)
+
         i_enc2 = self.IE_block2(i_enc2)
         hv_2 = self.HVE_block2(hv_2)
 
-        i_enc3 = self.I_LCA2(i_enc2, hv_2)
-        hv_3 = self.HV_LCA2(hv_2, i_enc2)
+        i_enc3 = lca_call(self.I_LCA2, i_enc2, hv_2)
+        hv_3 = lca_call(self.HV_LCA2, hv_2, i_enc2)
         v_jump2 = i_enc3
         hv_jump2 = hv_3
         # 按照网络结构图应该是这样：
@@ -211,7 +233,7 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         # hv_3 = self.HVE_block3(hv_2)
 
         # Apply a second region prior at a deeper stage (less texture-sensitive, more semantic)
-        if index_map is not None:
+        if index_map is not None and prior_mode != 'glib':
             target_hw = i_enc3.shape[-2:]
             if prior_mode == 'film':
                 S = self.soft_mask(index_map, target_hw=target_hw)
@@ -226,16 +248,32 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                 A = self.boundary_map(index_map, target_hw=target_hw)
                 i_enc3 = self.structure_gate2(i_enc3, A)
 
-        i_enc4 = self.I_LCA3(i_enc3, hv_3)
-        hv_4 = self.HV_LCA3(hv_3, i_enc3)
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_i:
+            i_enc3 = self.I_GLIB2(i_enc3, index_map)
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
+            hv_3 = self.HV_GLIB2(hv_3, index_map)
 
-        i_dec4 = self.I_LCA4(i_enc4, hv_4)
-        hv_4 = self.HV_LCA4(hv_4, i_enc4)
+        i_enc4 = lca_call(self.I_LCA3, i_enc3, hv_3)
+        hv_4 = lca_call(self.HV_LCA3, hv_3, i_enc3)
+
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_i:
+            i_enc4 = self.I_GLIB3(i_enc4, index_map)
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
+            hv_4 = self.HV_GLIB3(hv_4, index_map)
+
+        i_dec4 = lca_call(self.I_LCA4, i_enc4, hv_4)
+        hv_4 = lca_call(self.HV_LCA4, hv_4, i_enc4)
 
         hv_3 = self.HVD_block3(hv_4, hv_jump2)
         i_dec3 = self.ID_block3(i_dec4, v_jump2)
-        i_dec2 = self.I_LCA5(i_dec3, hv_3)
-        hv_2 = self.HV_LCA5(hv_3, i_dec3)
+
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_i:
+            i_dec3 = self.I_GLIB4(i_dec3, index_map)
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
+            hv_3 = self.HV_GLIB4(hv_3, index_map)
+
+        i_dec2 = lca_call(self.I_LCA5, i_dec3, hv_3)
+        hv_2 = lca_call(self.HV_LCA5, hv_3, i_dec3)
 
         hv_2 = self.HVD_block2(hv_2, hv_jump1)
         # 按照网络结构图应该是这样：
@@ -243,10 +281,21 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         # 原来仓库代码：
         # i_dec2 = self.ID_block2(i_dec3, v_jump1)
 
-        i_dec1 = self.I_LCA6(i_dec2, hv_2)
-        hv_1 = self.HV_LCA6(hv_2, i_dec2)
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_i:
+            i_dec2 = self.I_GLIB5(i_dec2, index_map)
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
+            hv_2 = self.HV_GLIB5(hv_2, index_map)
+
+        i_dec1 = lca_call(self.I_LCA6, i_dec2, hv_2)
+        hv_1 = lca_call(self.HV_LCA6, hv_2, i_dec2)
 
         i_dec1 = self.ID_block1(i_dec1, i_jump0)
+
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_i:
+            i_dec1 = self.I_GLIB6(i_dec1, index_map)
+        if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
+            hv_1 = self.HV_GLIB6(hv_1, index_map)
+
         i_dec0 = self.ID_block0(i_dec1)
         hv_1 = self.HVD_block1(hv_1, hv_jump0)
         hv_0 = self.HVD_block0(hv_1)

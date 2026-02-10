@@ -79,6 +79,76 @@ class GTMeanLoss(nn.Module):
         return loss.mean()
 
 
+class RegionExposureLoss(nn.Module):
+    """
+    Region Exposure Matching (REM) loss.
+
+    Enforces per-region exposure consistency between prediction and GT using index_map.
+    Uses soft masks to compute region-wise mean brightness for RGB (luma) and HVI I channel.
+    """
+
+    def __init__(self, logit_scale: float = 1.0, eps: float = 1e-6):
+        super().__init__()
+        self.logit_scale = float(logit_scale)
+        self.eps = float(eps)
+
+    def _soft_mask(self, index_map: torch.Tensor, target_hw):
+        if index_map.dim() != 3:
+            raise ValueError(f"index_map must be (B,H,W), got {tuple(index_map.shape)}")
+        if index_map.dtype != torch.int64:
+            index_map = index_map.long()
+        b, h, w = index_map.shape
+        k = int(index_map.max().item()) + 1
+        if k <= 0:
+            raise ValueError("index_map has no valid region ids.")
+        one_hot = F.one_hot(index_map, num_classes=k).permute(0, 3, 1, 2).float()
+        if (h, w) != target_hw:
+            one_hot = F.interpolate(one_hot, size=target_hw, mode="bilinear", align_corners=True)
+            one_hot = one_hot.clamp_min(0.0)
+        logits = torch.log(one_hot + self.eps) * self.logit_scale
+        return F.softmax(logits, dim=1)
+
+    def _region_mean(self, feat: torch.Tensor, mask: torch.Tensor):
+        b, c, h, w = feat.shape
+        _, k, mh, mw = mask.shape
+        if (h, w) != (mh, mw):
+            raise ValueError(f"Feature size {(h,w)} and mask size {(mh,mw)} must match.")
+        feat_flat = feat.view(b, c, -1)
+        mask_flat = mask.view(b, k, -1)
+        weights = mask_flat / (mask_flat.sum(-1, keepdim=True) + self.eps)
+        return torch.einsum("bkn,bcn->bkc", weights, feat_flat)
+
+    @staticmethod
+    def _luma(x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] < 3:
+            raise ValueError("RGB input must have at least 3 channels.")
+        weights = x.new_tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)
+        return (x[:, :3, :, :] * weights).sum(dim=1, keepdim=True)
+
+    def forward(self, pred_rgb, pred_hvi, gt_rgb, gt_hvi, index_map):
+        if index_map is None:
+            raise RuntimeError("RegionExposureLoss requires index_map (use_region_prior=True).")
+        if pred_hvi.shape[1] < 3 or gt_hvi.shape[1] < 3:
+            raise ValueError("HVI input must have at least 3 channels.")
+
+        target_hw = pred_rgb.shape[-2:]
+        mask = self._soft_mask(index_map, target_hw=target_hw)
+
+        y_pred = self._luma(pred_rgb)
+        y_gt = self._luma(gt_rgb)
+        i_pred = pred_hvi[:, 2:3, :, :]
+        i_gt = gt_hvi[:, 2:3, :, :]
+
+        y_pred_mean = self._region_mean(y_pred, mask).squeeze(-1)
+        y_gt_mean = self._region_mean(y_gt, mask).squeeze(-1)
+        i_pred_mean = self._region_mean(i_pred, mask).squeeze(-1)
+        i_gt_mean = self._region_mean(i_gt, mask).squeeze(-1)
+
+        l1_y = (y_pred_mean - y_gt_mean).abs().mean()
+        l1_i = (i_pred_mean - i_gt_mean).abs().mean()
+        return 0.5 * (l1_y + l1_i)
+
+
 class EdgeLoss(nn.Module):
     def __init__(self,loss_weight=1.0, reduction='mean'):
         super(EdgeLoss, self).__init__()
@@ -257,4 +327,3 @@ class CCLLoss(nn.Module):
         l_hv = l_hv * l_hv
 
         return self.loss_weight * (l_i + l_i_hv + l_hv)
-
