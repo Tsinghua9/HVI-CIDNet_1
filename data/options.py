@@ -35,6 +35,8 @@ def option():
     parser.add_argument('--ode_tol', type=float, default=1e-3, help='odeint rtol/atol')
     parser.add_argument('--diem_num_experts', type=int, default=3, help='number of experts in DIEM_v2 dynamic FFN')
     parser.add_argument('--diem_router_temp', type=float, default=1.0, help='base router temperature for DIEM_v2')
+    parser.add_argument('--diem_sparse_topk', type=int, default=2, help='top-k sparse routing in DIEM_v2 experts')
+    parser.add_argument('--diem_illum_gate_temp', type=float, default=1.0, help='temperature for illumination gate in DIEM_v2 attention')
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
     parser.add_argument('--prior_label_dir', type=str, default=None, help='label folder; defaults to <train_root>/label if not set')
@@ -126,6 +128,7 @@ def option():
     # auto grad, turn off to speed up training
     parser.add_argument('--grad_detect', type=_str2bool, default=False, help='if gradient explosion occurs, turn-on it')
     parser.add_argument('--grad_clip', type=_str2bool, default=True, help='if gradient fluctuates too much, turn-on it')
+    parser.add_argument('--save_best_ckpt', type=_str2bool, default=True, help='save best checkpoint based on validation metrics')
     
     
     # choose which dataset you want to train

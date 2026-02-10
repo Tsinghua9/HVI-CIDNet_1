@@ -368,10 +368,27 @@ class WaveFormerI_LCA(nn.Module):
         return x
 
 
-class PriorAwareCAB(nn.Module):
+class IllumEstimator(nn.Module):
+    def __init__(self, dim, bias=False):
+        super().__init__()
+        hidden = max(dim // 2, 8)
+        self.net = nn.Sequential(
+            nn.Conv2d(dim * 2, hidden, kernel_size=1, bias=bias),
+            nn.GELU(),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1, groups=1, bias=bias),
+            nn.GELU(),
+            nn.Conv2d(hidden, 1, kernel_size=1, bias=bias),
+        )
+
+    def forward(self, x, y):
+        illum = self.net(torch.cat([x, y], dim=1))
+        return torch.sigmoid(illum)
+
+
+class RegionIllumAttention(nn.Module):
     supports_prior_ctx = True
 
-    def __init__(self, dim, num_heads, bias=False, lambda_init=1.0, lambda_max=1.5, eps=1e-6):
+    def __init__(self, dim, num_heads, bias=False, lambda_init=1.0, lambda_max=1.5, illum_gate_temp=1.0, eps=1e-6):
         super().__init__()
         self.num_heads = int(num_heads)
         self.temperature = nn.Parameter(torch.ones(self.num_heads, 1, 1))
@@ -379,9 +396,10 @@ class PriorAwareCAB(nn.Module):
         self.lambda_p_min = 0.0
         self.lambda_p_max = float(lambda_max)
         self.prior_scale = nn.Parameter(torch.tensor(0.1))
+        self.illum_gate_temp = max(float(illum_gate_temp), 1e-3)
         self.eps = float(eps)
-        # Project a pooled prior token into per-head channel gates; used to form a compact (c x c) bias.
         self.prior_vec_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
+        self.illum_head = nn.Linear(1, self.num_heads, bias=True)
 
         self.q = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
         self.q_dwconv = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, groups=dim, bias=bias)
@@ -411,13 +429,8 @@ class PriorAwareCAB(nn.Module):
             if S.shape[-2:] != (h, w):
                 S = F.interpolate(S, size=(h, w), mode="bilinear", align_corners=True)
             S = S.clamp_min(0.0)
-
-            # Prior feature map: sum_k S_k(x) * V_k (region token), shape (B,C,H,W)
-            # Avoid any (B,N,N) intermediate to keep memory bounded.
             token_map = torch.einsum("bkhw,bkc->bchw", S, V)
             prior_feat = prior_feat + weight * token_map
-
-            # Pooled prior token for compact channel-bias.
             prior_token = prior_token + weight * V.mean(dim=1)
             weight_sum += weight
             kept.append({"S": S, "V": V, "weight": weight})
@@ -429,7 +442,6 @@ class PriorAwareCAB(nn.Module):
         prior_token = prior_token / weight_sum
         y = y + torch.tanh(self.prior_scale) * prior_feat
 
-        # Build a compact (c x c) bias in channel-attention space (matches CAB behavior).
         c_per_head = c // self.num_heads
         token_4d = prior_token.view(b, c, 1, 1)
         vec = self.prior_vec_proj(token_4d).view(b, self.num_heads, c_per_head)
@@ -437,15 +449,14 @@ class PriorAwareCAB(nn.Module):
         bias = torch.einsum("bhc,bhd->bhcd", vec, vec)
         return y, bias, kept
 
-    def forward(self, x, y, prior_ctx=None, return_aux=False):
-        b, c, h, w = x.shape
+    def forward(self, x, y, illum_map=None, prior_ctx=None, return_aux=False):
+        b, _, h, w = x.shape
 
         y_in, prior_bias, kept = self._compose_prior(y, prior_ctx, h, w)
         q = self.q_dwconv(self.q(x))
         kv = self.kv_dwconv(self.kv(y_in))
         k, v = kv.chunk(2, dim=1)
 
-        # Match original CAB: attention along channel tokens (c x c), not spatial tokens (N x N).
         q = rearrange(q, "b (head c) h w -> b head c (h w)", head=self.num_heads)
         k = rearrange(k, "b (head c) h w -> b head c (h w)", head=self.num_heads)
         v = rearrange(v, "b (head c) h w -> b head c (h w)", head=self.num_heads)
@@ -453,13 +464,18 @@ class PriorAwareCAB(nn.Module):
         q = F.normalize(q, dim=-1)
         k = F.normalize(k, dim=-1)
 
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.temperature  # (B,head,c,c)
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.temperature
         if prior_bias is not None:
             with torch.no_grad():
                 self.lambda_p.clamp_(min=float(self.lambda_p_min), max=float(self.lambda_p_max))
             attn_logits = attn_logits + self.lambda_p.view(1, self.num_heads, 1, 1) * prior_bias
-        attn = F.softmax(attn_logits, dim=-1)
 
+        if illum_map is not None:
+            illum_token = F.adaptive_avg_pool2d(illum_map, output_size=1).flatten(1)
+            illum_gate = torch.sigmoid(self.illum_head(illum_token) / self.illum_gate_temp).view(b, self.num_heads, 1, 1)
+            attn_logits = attn_logits * (1.0 + illum_gate)
+
+        attn = F.softmax(attn_logits, dim=-1)
         out = torch.matmul(attn, v)
         out = rearrange(out, "b head c (h w) -> b (head c) h w", head=self.num_heads, h=h, w=w)
         out = self.project_out(out)
@@ -469,14 +485,13 @@ class PriorAwareCAB(nn.Module):
 
         aux = {}
         if kept:
-            # Region-token alignment: pool predicted feature by region masks, match provided region tokens.
             loss_sum = 0.0
             w_sum = 0.0
             for entry in kept:
-                S = entry["S"]  # (B,K,H,W)
-                V = entry["V"]  # (B,K,C)
+                S = entry["S"]
+                V = entry["V"]
                 w_e = float(entry.get("weight", 1.0))
-                denom = S.flatten(2).sum(dim=-1, keepdim=True).clamp_min(self.eps)  # (B,K,1)
+                denom = S.flatten(2).sum(dim=-1, keepdim=True).clamp_min(self.eps)
                 V_pred = torch.einsum("bchw,bkhw->bkc", out, S) / denom
                 loss_sum = loss_sum + w_e * F.smooth_l1_loss(V_pred, V, reduction="mean")
                 w_sum += w_e
@@ -502,12 +517,20 @@ class _ExpertConv(nn.Module):
         return self.net(x)
 
 
-class DynamicExpertFFN(nn.Module):
+class Top2SparseMoE(nn.Module):
     supports_prior_ctx = True
 
-    def __init__(self, dim, num_experts=3, router_temp=1.0, bias=False):
+    def __init__(
+        self,
+        dim,
+        num_experts=3,
+        router_temp=1.0,
+        sparse_topk=2,
+        bias=False,
+    ):
         super().__init__()
         self.num_experts = int(num_experts)
+        self.sparse_topk = max(1, int(sparse_topk))
         self.router_temp_base = max(float(router_temp), 1e-3)
         self.router_temp = self.router_temp_base
         self.router_warm_temp = max(1.5, self.router_temp_base)
@@ -560,7 +583,14 @@ class DynamicExpertFFN(nn.Module):
         gap_p = self._prior_token(prior_ctx, gap_z)
         router_in = torch.cat([gap_z, gap_x, gap_y, gap_p], dim=1)
         logits = self.router(router_in) / (self.router_temp + 1e-6)
-        probs = F.softmax(logits, dim=-1)
+        topk = min(self.sparse_topk, self.num_experts)
+        if topk < self.num_experts:
+            topv, topi = torch.topk(logits, k=topk, dim=-1)
+            sparse_logits = torch.full_like(logits, -1e4)
+            sparse_logits.scatter_(1, topi, topv)
+            probs = F.softmax(sparse_logits, dim=-1)
+        else:
+            probs = F.softmax(logits, dim=-1)
 
         expert_outs = [expert(x) for expert in self.experts]
         expert_outs = torch.stack(expert_outs, dim=1)  # (B,E,C,H,W)
@@ -568,68 +598,154 @@ class DynamicExpertFFN(nn.Module):
 
         if not return_aux:
             return mixed
-        return mixed, {"router_probs": probs}
+
+        eps = 1e-8
+        mean_prob = probs.mean(dim=0)
+        router_entropy = -(probs * (probs + eps).log()).sum(dim=-1).mean()
+        expert_usage_std = mean_prob.std(unbiased=False)
+        return mixed, {
+            "router_probs": probs,
+            "router_entropy": router_entropy,
+            "expert_usage_std": expert_usage_std,
+        }
 
 
-class FreqRefine(nn.Module):
+class IllumRefine(nn.Module):
     def __init__(self, dim, bias=False):
         super().__init__()
-        self.branch = nn.Sequential(
+        self.local = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=bias),
+            nn.GELU(),
             nn.Conv2d(dim, dim, kernel_size=3, padding=3, dilation=3, groups=dim, bias=bias),
             nn.GELU(),
             nn.Conv2d(dim, dim, kernel_size=1, bias=bias),
         )
-        self.gamma = nn.Parameter(torch.tensor(0.1))
+        self.illum_proj = nn.Conv2d(1, dim, kernel_size=1, bias=True)
 
-    def forward(self, x):
-        return x + torch.tanh(self.gamma) * self.branch(x)
+    def forward(self, x, illum_map):
+        if illum_map.shape[-2:] != x.shape[-2:]:
+            illum_map = F.interpolate(illum_map, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        illum_gate = torch.sigmoid(self.illum_proj(illum_map))
+        return self.local(x) * illum_gate
 
 
-class DIEMCrossV2(nn.Module):
+class RIPMixer(nn.Module):
     supports_prior_ctx = True
 
-    def __init__(self, dim, num_heads, num_experts=3, router_temp=1.0, bias=False):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        num_experts=3,
+        router_temp=1.0,
+        sparse_topk=2,
+        illum_gate_temp=1.0,
+        bias=False,
+    ):
         super().__init__()
-        self.attn = PriorAwareCAB(dim, num_heads, bias=bias)
-        self.ffn = DynamicExpertFFN(dim, num_experts=num_experts, router_temp=router_temp, bias=bias)
-        self.freq = FreqRefine(dim, bias=bias)
-        self.res_attn = nn.Parameter(torch.full((1, dim, 1, 1), 0.1))
-        self.res_ffn = nn.Parameter(torch.full((1, dim, 1, 1), 0.1))
+        self.illum_estimator = IllumEstimator(dim, bias=bias)
+        self.attn = RegionIllumAttention(
+            dim,
+            num_heads,
+            bias=bias,
+            illum_gate_temp=illum_gate_temp,
+        )
+        self.moe = Top2SparseMoE(
+            dim,
+            num_experts=num_experts,
+            router_temp=router_temp,
+            sparse_topk=sparse_topk,
+            bias=bias,
+        )
+        self.illum_refine = IllumRefine(dim, bias=bias)
+        self.g1 = nn.Parameter(torch.full((1, dim, 1, 1), 0.1))
+        self.g2 = nn.Parameter(torch.full((1, dim, 1, 1), 0.1))
+        self.g3 = nn.Parameter(torch.full((1, dim, 1, 1), 0.1))
 
     def set_progress(self, progress: float):
-        self.ffn.set_progress(progress)
+        self.moe.set_progress(progress)
 
     def forward(self, x, y, prior_ctx=None, return_aux=False):
+        illum_map = self.illum_estimator(x, y)
         if return_aux:
-            z, attn_aux = self.attn(x, y, prior_ctx=prior_ctx, return_aux=True)
-            ffn_out, ffn_aux = self.ffn(z, x, y, prior_ctx=prior_ctx, return_aux=True)
+            z_attn, attn_aux = self.attn(x, y, illum_map=illum_map, prior_ctx=prior_ctx, return_aux=True)
+            z_moe, moe_aux = self.moe(x, x, y, prior_ctx=prior_ctx, return_aux=True)
         else:
-            z = self.attn(x, y, prior_ctx=prior_ctx, return_aux=False)
-            ffn_out = self.ffn(z, x, y, prior_ctx=prior_ctx, return_aux=False)
+            z_attn = self.attn(x, y, illum_map=illum_map, prior_ctx=prior_ctx, return_aux=False)
+            z_moe = self.moe(x, x, y, prior_ctx=prior_ctx, return_aux=False)
             attn_aux = {}
-            ffn_aux = {}
+            moe_aux = {}
+        z_illu = self.illum_refine(x, illum_map)
 
-        fused = x + self.res_attn * z + self.res_ffn * ffn_out
-        out = self.freq(fused)
+        out = x + torch.tanh(self.g1) * z_attn + torch.tanh(self.g2) * z_moe + torch.tanh(self.g3) * z_illu
 
         if not return_aux:
             return out
         aux = {}
         if "prior_align" in attn_aux:
             aux["prior_align"] = attn_aux["prior_align"]
-        if "router_probs" in ffn_aux:
-            aux["router_probs"] = ffn_aux["router_probs"]
+        for key in ("router_probs", "router_entropy", "expert_usage_std"):
+            if key in moe_aux:
+                aux[key] = moe_aux[key]
         return out, aux
+
+
+class DIEMCrossV2(nn.Module):
+    supports_prior_ctx = True
+
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        num_experts=3,
+        router_temp=1.0,
+        sparse_topk=2,
+        illum_gate_temp=1.0,
+        bias=False,
+    ):
+        super().__init__()
+        self.mixer = RIPMixer(
+            dim=dim,
+            num_heads=num_heads,
+            num_experts=num_experts,
+            router_temp=router_temp,
+            sparse_topk=sparse_topk,
+            illum_gate_temp=illum_gate_temp,
+            bias=bias,
+        )
+
+    def set_progress(self, progress: float):
+        self.mixer.set_progress(progress)
+
+    def forward(self, x, y, prior_ctx=None, return_aux=False):
+        return self.mixer(x, y, prior_ctx=prior_ctx, return_aux=return_aux)
 
 
 class DIEMHV_LCA_V2(nn.Module):
     supports_prior_ctx = True
 
-    def __init__(self, dim, num_heads, num_experts=3, router_temp=1.0, bias=False):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        num_experts=3,
+        router_temp=1.0,
+        sparse_topk=2,
+        illum_gate_temp=1.0,
+        bias=False,
+    ):
         super().__init__()
         self.gdfn = IEL(dim)
         self.norm = LayerNorm(dim)
-        self.ffn = DIEMCrossV2(dim, num_heads, num_experts=num_experts, router_temp=router_temp, bias=bias)
+        self.ffn = DIEMCrossV2(
+            dim,
+            num_heads,
+            num_experts=num_experts,
+            router_temp=router_temp,
+            sparse_topk=sparse_topk,
+            illum_gate_temp=illum_gate_temp,
+            bias=bias,
+        )
 
     def set_progress(self, progress: float):
         self.ffn.set_progress(progress)
@@ -650,11 +766,28 @@ class DIEMHV_LCA_V2(nn.Module):
 class DIEMI_LCA_V2(nn.Module):
     supports_prior_ctx = True
 
-    def __init__(self, dim, num_heads, num_experts=3, router_temp=1.0, bias=False):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        num_experts=3,
+        router_temp=1.0,
+        sparse_topk=2,
+        illum_gate_temp=1.0,
+        bias=False,
+    ):
         super().__init__()
         self.norm = LayerNorm(dim)
         self.gdfn = IEL(dim)
-        self.ffn = DIEMCrossV2(dim, num_heads, num_experts=num_experts, router_temp=router_temp, bias=bias)
+        self.ffn = DIEMCrossV2(
+            dim,
+            num_heads,
+            num_experts=num_experts,
+            router_temp=router_temp,
+            sparse_topk=sparse_topk,
+            illum_gate_temp=illum_gate_temp,
+            bias=bias,
+        )
 
     def set_progress(self, progress: float):
         self.ffn.set_progress(progress)

@@ -115,6 +115,12 @@ def _get_prior_attn2_stats(model):
                 stats[key] = val
     return stats or None
 
+def _mean_tensor_list(vals, ref_tensor):
+    valid = [v for v in vals if v is not None]
+    if len(valid) == 0:
+        return ref_tensor.new_zeros(())
+    return torch.stack(valid).mean()
+
 def seed_torch():
     # seed = random.randint(1, 1000000)
     seed = opt.seed
@@ -146,6 +152,8 @@ def train(epoch):
     pic_last_10 = 0
     train_len = len(training_data_loader)
     iter = 0
+    aux_sum = {"prior_align_raw": 0.0, "expert_balance_raw": 0.0, "router_entropy": 0.0, "expert_usage_std": 0.0}
+    aux_cnt = 0
     torch.autograd.set_detect_anomaly(opt.grad_detect)
     for batch in tqdm(training_data_loader):
         if opt.use_region_prior:
@@ -202,19 +210,32 @@ def train(epoch):
         if opt.loss_ccl:
             loss_ccl = CCL_loss(output_hvi, gt_hvi)
             loss = loss + opt.ccl_weight * loss_ccl
-        if opt.lca_type == "diem_v2" and opt.loss_prior_align:
+        if use_aux:
             loss_prior_align = PriorAlign_loss(aux_dict.get("prior_align", []), output_rgb)
+            loss_expert_balance = ExpertBalance_loss(aux_dict.get("router_probs", []), output_rgb)
+        else:
+            loss_prior_align = output_rgb.new_zeros(())
+            loss_expert_balance = output_rgb.new_zeros(())
+
+        if opt.lca_type == "diem_v2" and opt.loss_prior_align:
             loss = loss + opt.prior_align_weight * loss_prior_align
         if opt.lca_type == "diem_v2" and opt.loss_expert_balance:
-            loss_expert_balance = ExpertBalance_loss(aux_dict.get("router_probs", []), output_rgb)
             loss = loss + opt.expert_balance_weight * loss_expert_balance
+
+        if use_aux:
+            router_entropy = _mean_tensor_list(aux_dict.get("router_entropy", []), output_rgb)
+            expert_usage_std = _mean_tensor_list(aux_dict.get("expert_usage_std", []), output_rgb)
+            aux_sum["prior_align_raw"] += float(loss_prior_align.detach().cpu().item())
+            aux_sum["expert_balance_raw"] += float(loss_expert_balance.detach().cpu().item())
+            aux_sum["router_entropy"] += float(router_entropy.detach().cpu().item())
+            aux_sum["expert_usage_std"] += float(expert_usage_std.detach().cpu().item())
+            aux_cnt += 1
         iter += 1
-        
-        if opt.grad_clip:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.01, norm_type=2)
-        
+
         optimizer.zero_grad()
         loss.backward()
+        if opt.grad_clip:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.01, norm_type=2)
         optimizer.step()
         
         loss_print = loss_print + loss.item()
@@ -232,15 +253,22 @@ def train(epoch):
                 os.mkdir(opt.val_folder+'training') 
             output_img.save(opt.val_folder+'training/test.png')
             gt_img.save(opt.val_folder+'training/gt.png')
-    return loss_print, pic_cnt
+    aux_epoch = {"prior_align_raw": 0.0, "expert_balance_raw": 0.0, "router_entropy": 0.0, "expert_usage_std": 0.0}
+    if aux_cnt > 0:
+        for key in aux_epoch.keys():
+            aux_epoch[key] = aux_sum[key] / float(aux_cnt)
+    return loss_print, pic_cnt, aux_epoch
                 
 
-def checkpoint(epoch):
+def checkpoint(epoch, name=None):
     if not os.path.exists("./weights"):          
         os.mkdir("./weights") 
     if not os.path.exists("./weights/train"):          
-        os.mkdir("./weights/train")  
-    model_out_path = "./weights/train/epoch_{}.pth".format(epoch)
+        os.mkdir("./weights/train")
+    if name is None:
+        model_out_path = "./weights/train/epoch_{}.pth".format(epoch)
+    else:
+        model_out_path = f"./weights/train/{name}.pth"
     torch.save(model.state_dict(), model_out_path)
     print("Checkpoint saved to {}".format(model_out_path))
     return model_out_path
@@ -318,6 +346,8 @@ def build_model():
                    ode_tol=opt.ode_tol,
                    diem_num_experts=opt.diem_num_experts,
                    diem_router_temp=opt.diem_router_temp,
+                   diem_sparse_topk=opt.diem_sparse_topk,
+                   diem_illum_gate_temp=opt.diem_illum_gate_temp,
                    lca_type=opt.lca_type).cuda()
     if opt.start_epoch > 0:
         pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
@@ -437,12 +467,15 @@ if __name__ == '__main__':
         f.write(f"ode_tol: {opt.ode_tol}\n")
         f.write(f"diem_num_experts: {opt.diem_num_experts}\n")
         f.write(f"diem_router_temp: {opt.diem_router_temp}\n")
+        f.write(f"diem_sparse_topk: {opt.diem_sparse_topk}\n")
+        f.write(f"diem_illum_gate_temp: {opt.diem_illum_gate_temp}\n")
         f.write(f"loss_ccl: {opt.loss_ccl}\n")
         f.write(f"ccl_weight: {opt.ccl_weight}\n")
         f.write(f"loss_prior_align: {opt.loss_prior_align}\n")
         f.write(f"prior_align_weight: {opt.prior_align_weight}\n")
         f.write(f"loss_expert_balance: {opt.loss_expert_balance}\n")
         f.write(f"expert_balance_weight: {opt.expert_balance_weight}\n")
+        f.write(f"save_best_ckpt: {opt.save_best_ckpt}\n")
         f.write(f"prior_label_dir: {opt.prior_label_dir}\n")
         f.write(f"max_regions: {opt.max_regions}\n")
         f.write(f"attn_alpha1_init: {opt.attn_alpha1_init}\n")
@@ -453,13 +486,25 @@ if __name__ == '__main__':
         f.write(f"attn_mask_bias_scale2_max: {opt.attn_mask_bias_scale2_max}\n")
         # f.write("| Epochs | PSNR | SSIM | LPIPS |\n")
         # f.write("|----------------------|----------------------|----------------------|----------------------|\n")
-        f.write("| Epoch | PSNR | SSIM | LPIPS | mode | alpha1 | a1 | d1 | eff1 | mb1 | alpha2 | a2 | d2 | eff2 | mb2 |\n")
-        f.write("|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        f.write("| Epoch | PSNR | SSIM | LPIPS | mode | alpha1 | a1 | d1 | eff1 | mb1 | alpha2 | a2 | d2 | eff2 | mb2 | aux_pa | aux_eb | router_H | usage_std |\n")
+        f.write("|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 
 
+    best_psnr = float("-inf")
+    best_ssim = float("-inf")
+    best_epoch = -1
     for epoch in range(start_epoch+1, opt.nEpochs + start_epoch + 1):
-        epoch_loss, pic_num = train(epoch)
+        epoch_loss, pic_num, aux_epoch = train(epoch)
         scheduler.step()
+        if opt.lca_type == "diem_v2":
+            print(
+                "[aux] prior_align_raw={:.6f} expert_balance_raw={:.6f} router_entropy={:.6f} expert_usage_std={:.6f}".format(
+                    aux_epoch["prior_align_raw"],
+                    aux_epoch["expert_balance_raw"],
+                    aux_epoch["router_entropy"],
+                    aux_epoch["expert_usage_std"],
+                )
+            )
         if opt.use_region_prior:
             alpha_raw, alpha_sigmoid = _get_prior_alpha(model, opt.prior_mode)
             alpha2_raw, alpha2_sigmoid = _get_prior_alpha2(model, opt.prior_mode)
@@ -578,11 +623,32 @@ if __name__ == '__main__':
                 eff2_s   = f"{(alpha2_sigmoid*d2):.6f}"
                 mb2_s    = f"{mb2:.3f}"
 
+            aux_pa_s = aux_eb_s = router_h_s = usage_std_s = "-"
+            if opt.lca_type == "diem_v2":
+                aux_pa_s = f"{aux_epoch['prior_align_raw']:.6f}"
+                aux_eb_s = f"{aux_epoch['expert_balance_raw']:.6f}"
+                router_h_s = f"{aux_epoch['router_entropy']:.6f}"
+                usage_std_s = f"{aux_epoch['expert_usage_std']:.6f}"
+
             with open(log_path, "a") as f:
                 f.write(
                     f"| {epoch} | {avg_psnr:.4f} | {avg_ssim:.4f} | {avg_lpips:.4f} | {mode_s} | "
                     f"{alpha1_s} | {a1_s} | {d1_s} | {eff1_s} | {mb1_s} | "
-                    f"{alpha2_s} | {a2_s} | {d2_s} | {eff2_s} | {mb2_s} |\n"
+                    f"{alpha2_s} | {a2_s} | {d2_s} | {eff2_s} | {mb2_s} | "
+                    f"{aux_pa_s} | {aux_eb_s} | {router_h_s} | {usage_std_s} |\n"
                 )
 
+            better = (avg_psnr > best_psnr) or (avg_psnr == best_psnr and avg_ssim > best_ssim)
+            if better:
+                best_psnr = avg_psnr
+                best_ssim = avg_ssim
+                best_epoch = epoch
+                if opt.save_best_ckpt:
+                    checkpoint(epoch, name="best")
+                    print(f"[best] epoch={best_epoch} psnr={best_psnr:.4f} ssim={best_ssim:.4f}")
+
         torch.cuda.empty_cache()
+
+    checkpoint(start_epoch + opt.nEpochs, name="last")
+    if best_epoch > 0:
+        print(f"[best] final best epoch={best_epoch} psnr={best_psnr:.4f} ssim={best_ssim:.4f}")

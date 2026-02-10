@@ -24,6 +24,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  ode_tol=1e-3,
                  diem_num_experts=3,
                  diem_router_temp=1.0,
+                 diem_sparse_topk=2,
+                 diem_illum_gate_temp=1.0,
                  lca_type='cab'):
         super(CIDNet, self).__init__()
 
@@ -132,19 +134,25 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             self.I_LCA5 = i_lca(ch3, head3)
             self.I_LCA6 = i_lca(ch2, head2)
         elif lca_type == "diem_v2":
-            self.HV_LCA1 = hv_lca(ch2, head2, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.HV_LCA2 = hv_lca(ch3, head3, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.HV_LCA3 = hv_lca(ch4, head4, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.HV_LCA4 = hv_lca(ch4, head4, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.HV_LCA5 = hv_lca(ch3, head3, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.HV_LCA6 = hv_lca(ch2, head2, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            kwargs_v2 = dict(
+                num_experts=diem_num_experts,
+                router_temp=diem_router_temp,
+                sparse_topk=diem_sparse_topk,
+                illum_gate_temp=diem_illum_gate_temp,
+            )
+            self.HV_LCA1 = hv_lca(ch2, head2, **kwargs_v2)
+            self.HV_LCA2 = hv_lca(ch3, head3, **kwargs_v2)
+            self.HV_LCA3 = hv_lca(ch4, head4, **kwargs_v2)
+            self.HV_LCA4 = hv_lca(ch4, head4, **kwargs_v2)
+            self.HV_LCA5 = hv_lca(ch3, head3, **kwargs_v2)
+            self.HV_LCA6 = hv_lca(ch2, head2, **kwargs_v2)
 
-            self.I_LCA1 = i_lca(ch2, head2, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.I_LCA2 = i_lca(ch3, head3, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.I_LCA3 = i_lca(ch4, head4, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.I_LCA4 = i_lca(ch4, head4, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.I_LCA5 = i_lca(ch3, head3, num_experts=diem_num_experts, router_temp=diem_router_temp)
-            self.I_LCA6 = i_lca(ch2, head2, num_experts=diem_num_experts, router_temp=diem_router_temp)
+            self.I_LCA1 = i_lca(ch2, head2, **kwargs_v2)
+            self.I_LCA2 = i_lca(ch3, head3, **kwargs_v2)
+            self.I_LCA3 = i_lca(ch4, head4, **kwargs_v2)
+            self.I_LCA4 = i_lca(ch4, head4, **kwargs_v2)
+            self.I_LCA5 = i_lca(ch3, head3, **kwargs_v2)
+            self.I_LCA6 = i_lca(ch2, head2, **kwargs_v2)
         else:
             self.HV_LCA1 = hv_lca(ch2, head2, ode_cfg=ode_cfg)
             self.HV_LCA2 = hv_lca(ch3, head3, ode_cfg=ode_cfg)
@@ -245,7 +253,7 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         hvi = self.trans.HVIT(x)  # [B, 3, H, W] -> [H,V,I]
         i = hvi[:, 2, :, :].unsqueeze(1).to(dtypes)  # 抽出 I 通道给 I 分支
 
-        aux_bucket = {"prior_align": [], "router_probs": []}
+        aux_bucket = {"prior_align": [], "router_probs": [], "router_entropy": [], "expert_usage_std": []}
 
         def _collect(aux):
             if not return_aux or aux is None:
@@ -256,6 +264,12 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             router_probs = aux.get("router_probs", None)
             if router_probs is not None:
                 aux_bucket["router_probs"].append(router_probs)
+            router_entropy = aux.get("router_entropy", None)
+            if router_entropy is not None:
+                aux_bucket["router_entropy"].append(router_entropy)
+            expert_usage_std = aux.get("expert_usage_std", None)
+            if expert_usage_std is not None:
+                aux_bucket["expert_usage_std"].append(expert_usage_std)
 
         # low
         # Intensity分支
