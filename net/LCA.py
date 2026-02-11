@@ -622,11 +622,12 @@ class IllumRefine(nn.Module):
         )
         self.illum_proj = nn.Conv2d(1, dim, kernel_size=1, bias=True)
 
-    def forward(self, x, illum_map):
+    def forward(self, x, y, illum_map):
         if illum_map.shape[-2:] != x.shape[-2:]:
             illum_map = F.interpolate(illum_map, size=x.shape[-2:], mode="bilinear", align_corners=False)
         illum_gate = torch.sigmoid(self.illum_proj(illum_map))
-        return self.local(x) * illum_gate
+        fused = x + y
+        return self.local(fused) * illum_gate
 
 
 class RIPMixer(nn.Module):
@@ -675,7 +676,7 @@ class RIPMixer(nn.Module):
             z_moe = self.moe(x, x, y, prior_ctx=prior_ctx, return_aux=False)
             attn_aux = {}
             moe_aux = {}
-        z_illu = self.illum_refine(x, illum_map)
+        z_illu = self.illum_refine(x, y, illum_map)
 
         out = x + torch.tanh(self.g1) * z_attn + torch.tanh(self.g2) * z_moe + torch.tanh(self.g3) * z_illu
 
