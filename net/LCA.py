@@ -400,6 +400,11 @@ class RegionIllumAttention(nn.Module):
         self.eps = float(eps)
         self.prior_vec_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
         self.illum_head = nn.Linear(1, self.num_heads, bias=True)
+        self.ri_gate = nn.Sequential(
+            nn.Conv2d(2, dim, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.ri_scale = nn.Parameter(torch.tensor(0.1))
 
         self.q = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
         self.q_dwconv = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, groups=dim, bias=bias)
@@ -449,10 +454,40 @@ class RegionIllumAttention(nn.Module):
         bias = torch.einsum("bhc,bhd->bhcd", vec, vec)
         return y, bias, kept
 
+    def _region_density(self, prior_ctx, h, w):
+        if prior_ctx is None:
+            return None
+        entries = prior_ctx.get("entries", None)
+        if not entries:
+            return None
+        density = 0.0
+        weight_sum = 0.0
+        for entry in entries:
+            S = entry.get("S", None)
+            weight = float(entry.get("weight", 1.0))
+            if S is None:
+                continue
+            if S.shape[-2:] != (h, w):
+                S = F.interpolate(S, size=(h, w), mode="bilinear", align_corners=True)
+            S = S.clamp_min(0.0)
+            density = density + weight * S.sum(dim=1, keepdim=True)
+            weight_sum += weight
+        if weight_sum <= 0.0:
+            return None
+        density = density / weight_sum
+        norm = density.amax(dim=(2, 3), keepdim=True).clamp_min(self.eps)
+        return (density / norm).clamp(0.0, 1.0)
+
     def forward(self, x, y, illum_map=None, prior_ctx=None, return_aux=False):
         b, _, h, w = x.shape
 
         y_in, prior_bias, kept = self._compose_prior(y, prior_ctx, h, w)
+        r_map = self._region_density(prior_ctx, h, w)
+        if illum_map is not None and r_map is not None:
+            if r_map.shape[-2:] != illum_map.shape[-2:]:
+                r_map = F.interpolate(r_map, size=illum_map.shape[-2:], mode="bilinear", align_corners=False)
+            gate = self.ri_gate(torch.cat([illum_map, r_map], dim=1))
+            y_in = y_in * (1.0 + torch.tanh(self.ri_scale) * gate)
         q = self.q_dwconv(self.q(x))
         kv = self.kv_dwconv(self.kv(y_in))
         k, v = kv.chunk(2, dim=1)
@@ -530,7 +565,9 @@ class Top2SparseMoE(nn.Module):
     ):
         super().__init__()
         self.num_experts = int(num_experts)
-        self.sparse_topk = max(1, int(sparse_topk))
+        self.sparse_topk_max = max(1, int(sparse_topk))
+        self.sparse_topk_min = min(2, self.sparse_topk_max)
+        self.sparse_topk_eff = self.sparse_topk_max
         self.router_temp_base = max(float(router_temp), 1e-3)
         self.router_temp = self.router_temp_base
         self.router_warm_temp = max(1.5, self.router_temp_base)
@@ -556,6 +593,10 @@ class Top2SparseMoE(nn.Module):
             self.router_temp = self.router_warm_temp - (self.router_warm_temp - self.router_temp_base) * ratio
         else:
             self.router_temp = self.router_temp_base
+        if self.sparse_topk_max > self.sparse_topk_min:
+            self.sparse_topk_eff = self.sparse_topk_max if p < 0.3 else self.sparse_topk_min
+        else:
+            self.sparse_topk_eff = self.sparse_topk_max
 
     def _prior_token(self, prior_ctx, feat_like):
         if prior_ctx is None:
@@ -583,7 +624,7 @@ class Top2SparseMoE(nn.Module):
         gap_p = self._prior_token(prior_ctx, gap_z)
         router_in = torch.cat([gap_z, gap_x, gap_y, gap_p], dim=1)
         logits = self.router(router_in) / (self.router_temp + 1e-6)
-        topk = min(self.sparse_topk, self.num_experts)
+        topk = min(self.sparse_topk_eff, self.num_experts)
         if topk < self.num_experts:
             topv, topi = torch.topk(logits, k=topk, dim=-1)
             sparse_logits = torch.full_like(logits, -1e4)
@@ -670,10 +711,10 @@ class RIPMixer(nn.Module):
         illum_map = self.illum_estimator(x, y)
         if return_aux:
             z_attn, attn_aux = self.attn(x, y, illum_map=illum_map, prior_ctx=prior_ctx, return_aux=True)
-            z_moe, moe_aux = self.moe(x, x, y, prior_ctx=prior_ctx, return_aux=True)
+            z_moe, moe_aux = self.moe(z_attn, x, y, prior_ctx=prior_ctx, return_aux=True)
         else:
             z_attn = self.attn(x, y, illum_map=illum_map, prior_ctx=prior_ctx, return_aux=False)
-            z_moe = self.moe(x, x, y, prior_ctx=prior_ctx, return_aux=False)
+            z_moe = self.moe(z_attn, x, y, prior_ctx=prior_ctx, return_aux=False)
             attn_aux = {}
             moe_aux = {}
         z_illu = self.illum_refine(x, y, illum_map)
