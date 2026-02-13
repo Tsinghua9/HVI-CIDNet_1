@@ -404,7 +404,7 @@ class RegionIllumAttention(nn.Module):
             nn.Conv2d(2, dim, kernel_size=1, bias=True),
             nn.Sigmoid(),
         )
-        self.ri_scale = nn.Parameter(torch.tensor(0.1))
+        self.ri_scale = nn.Parameter(torch.tensor(0.0))
 
         self.q = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
         self.q_dwconv = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, groups=dim, bias=bias)
@@ -580,7 +580,7 @@ class Top2SparseMoE(nn.Module):
             self.experts.append(_ExpertConv(dim, kernel_size=ksz, dilation=dil, bias=bias))
 
         self.router = nn.Sequential(
-            nn.Linear(dim * 4, dim),
+            nn.Linear(dim * 4 + 1, dim),
             nn.GELU(),
             nn.Linear(dim, self.num_experts),
         )
@@ -617,12 +617,18 @@ class Top2SparseMoE(nn.Module):
             return torch.zeros_like(feat_like)
         return token / weight_sum
 
-    def forward(self, x, x_ref, y_ref, prior_ctx=None, return_aux=False):
+    def forward(self, x, x_ref, y_ref, illum_map=None, prior_ctx=None, return_aux=False):
         gap_z = x.mean(dim=(2, 3))
         gap_x = x_ref.mean(dim=(2, 3))
         gap_y = y_ref.mean(dim=(2, 3))
         gap_p = self._prior_token(prior_ctx, gap_z)
-        router_in = torch.cat([gap_z, gap_x, gap_y, gap_p], dim=1)
+        if illum_map is None:
+            illum_token = torch.zeros(gap_z.shape[0], 1, device=gap_z.device, dtype=gap_z.dtype)
+        else:
+            if illum_map.shape[-2:] != x.shape[-2:]:
+                illum_map = F.interpolate(illum_map, size=x.shape[-2:], mode="bilinear", align_corners=False)
+            illum_token = illum_map.mean(dim=(2, 3))
+        router_in = torch.cat([gap_z, gap_x, gap_y, gap_p, illum_token], dim=1)
         logits = self.router(router_in) / (self.router_temp + 1e-6)
         topk = min(self.sparse_topk_eff, self.num_experts)
         if topk < self.num_experts:
@@ -711,10 +717,10 @@ class RIPMixer(nn.Module):
         illum_map = self.illum_estimator(x, y)
         if return_aux:
             z_attn, attn_aux = self.attn(x, y, illum_map=illum_map, prior_ctx=prior_ctx, return_aux=True)
-            z_moe, moe_aux = self.moe(z_attn, x, y, prior_ctx=prior_ctx, return_aux=True)
+            z_moe, moe_aux = self.moe(z_attn, x, y, illum_map=illum_map, prior_ctx=prior_ctx, return_aux=True)
         else:
             z_attn = self.attn(x, y, illum_map=illum_map, prior_ctx=prior_ctx, return_aux=False)
-            z_moe = self.moe(z_attn, x, y, prior_ctx=prior_ctx, return_aux=False)
+            z_moe = self.moe(z_attn, x, y, illum_map=illum_map, prior_ctx=prior_ctx, return_aux=False)
             attn_aux = {}
             moe_aux = {}
         z_illu = self.illum_refine(x, y, illum_map)
