@@ -15,6 +15,9 @@ def option():
     parser.add_argument('--cropSize', type=int, default=256, help='image crop size (patch size)')
     parser.add_argument('--nEpochs', type=int, default=1000, help='number of epochs to train for end')
     parser.add_argument('--start_epoch', type=int, default=0, help='number of epochs to start, >0 is retrained a pre-trained pth')
+    parser.add_argument('--resume', type=str, default=None, help='checkpoint path to resume from (optional)')
+    parser.add_argument('--load_partial', type=_str2bool, default=False,
+                        help='allow partial state_dict loading (ignore missing/mismatched keys)')
     parser.add_argument('--snapshots', type=int, default=20, help='Snapshots for save checkpoints pth')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning Rate')
     parser.add_argument('--gpu_mode', type=_str2bool, default=True)
@@ -33,6 +36,14 @@ def option():
     parser.add_argument('--prior_mode', type=str, default='attn', choices=['gate', 'film', 'attn', 'glib'], help='how to inject region prior into CIDNet')
     parser.add_argument('--glib_on_i', type=_str2bool, default=True, help='enable GLIB on I branch when prior_mode=glib')
     parser.add_argument('--glib_on_hv', type=_str2bool, default=False, help='enable GLIB on HV branch when prior_mode=glib')
+    parser.add_argument('--pre_lca_film', type=_str2bool, default=False,
+                        help='apply mask-conditioned FiLM before I-branch LCA1/LCA2')
+    parser.add_argument('--pre_lca_film_scale', type=float, default=0.1,
+                        help='FiLM scale strength for pre-LCA modulation')
+    parser.add_argument('--pre_lca_film_bias', type=float, default=0.1,
+                        help='FiLM bias strength for pre-LCA modulation')
+    parser.add_argument('--pre_lca_film_alpha', type=float, default=-2.197225,
+                        help='FiLM residual gate alpha for pre-LCA modulation')
 
     # region prior hyperparams (for tuning / reproducibility)
     parser.add_argument('--max_regions', type=int, default=32,

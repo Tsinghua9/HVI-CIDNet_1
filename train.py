@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 import random
 from torchvision import transforms
@@ -17,6 +18,15 @@ from tqdm import tqdm
 from datetime import datetime
 
 opt = option().parse_args()
+
+if opt.resume and opt.start_epoch == 0:
+    match = re.search(r"epoch_(\d+)", os.path.basename(opt.resume))
+    if match:
+        opt.start_epoch = int(match.group(1))
+        print(f"[info] --resume detected; setting --start_epoch to {opt.start_epoch}")
+    else:
+        print("[warn] --resume set but start_epoch could not be inferred; "
+              "consider passing --start_epoch to keep scheduler/epochs aligned.")
 
 if (not opt.use_region_prior) and (opt.prior_label_dir is not None or opt.prior_mode != "gate"):
     print("[warn] prior_mode/prior_label_dir is set but --use_region_prior is False; region prior will NOT be used.")
@@ -130,6 +140,58 @@ def _get_prior_attn2_stats(model):
             else:
                 stats[key] = val
     return stats or None
+
+def _resolve_resume_path():
+    if opt.resume:
+        return opt.resume
+    if opt.start_epoch > 0:
+        return f"./weights/train/epoch_{opt.start_epoch}.pth"
+    return None
+
+def _maybe_adjust_state_prefix(state_dict, model_state):
+    if not state_dict:
+        return state_dict
+    state_has_module = all(k.startswith("module.") for k in state_dict.keys())
+    model_has_module = any(k.startswith("module.") for k in model_state.keys())
+    if state_has_module and not model_has_module:
+        return {k[len("module."):]: v for k, v in state_dict.items()}
+    if (not state_has_module) and model_has_module:
+        return {f"module.{k}": v for k, v in state_dict.items()}
+    return state_dict
+
+def _load_checkpoint(model, path, partial=False):
+    if not path:
+        return
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    ckpt = torch.load(path, map_location=lambda storage, loc: storage)
+    state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+    target = model.module if hasattr(model, "module") else model
+    model_state = target.state_dict()
+    state = _maybe_adjust_state_prefix(state, model_state)
+
+    if partial:
+        filtered = {}
+        mismatched = []
+        unexpected = []
+        for key, value in state.items():
+            if key not in model_state:
+                unexpected.append(key)
+                continue
+            if model_state[key].shape != value.shape:
+                mismatched.append(key)
+                continue
+            filtered[key] = value
+        target.load_state_dict(filtered, strict=False)
+        missing = [k for k in model_state.keys() if k not in filtered]
+        print(
+            f"[info] Partial load from {path}: loaded {len(filtered)} keys, "
+            f"skipped {len(mismatched)} mismatched, {len(unexpected)} unexpected, "
+            f"missing {len(missing)}."
+        )
+    else:
+        target.load_state_dict(state, strict=True)
+        print(f"[info] Loaded checkpoint: {path}")
 
 
 def seed_torch():
@@ -324,27 +386,74 @@ def build_model():
                    attn_mask_bias_scale1_max=opt.attn_mask_bias_scale1_max,
                    attn_mask_bias_scale2_max=opt.attn_mask_bias_scale2_max,
                    lca_type=opt.lca_type,
+                   max_regions=opt.max_regions,
+                   pre_lca_film=opt.pre_lca_film,
+                   pre_lca_film_scale=opt.pre_lca_film_scale,
+                   pre_lca_film_bias=opt.pre_lca_film_bias,
+                   pre_lca_film_alpha=opt.pre_lca_film_alpha,
                    glib_on_i=opt.glib_on_i,
                    glib_on_hv=opt.glib_on_hv).cuda()
-    if opt.start_epoch > 0:
-        pth = f"./weights/train/epoch_{opt.start_epoch}.pth"
-        model.load_state_dict(torch.load(pth, map_location=lambda storage, loc: storage))
+    resume_path = _resolve_resume_path()
+    if resume_path:
+        _load_checkpoint(model, resume_path, partial=opt.load_partial)
     return model
 
 def make_scheduler():
-    optimizer = optim.Adam(model.parameters(), lr=opt.lr)      
+    optimizer = optim.Adam(model.parameters(), lr=opt.lr)
+    remaining_epochs = opt.nEpochs
+    if not opt.resume:
+        remaining_epochs = opt.nEpochs - opt.start_epoch
+    if remaining_epochs <= 0:
+        raise ValueError(
+            f"Invalid epoch schedule: nEpochs={opt.nEpochs}, start_epoch={opt.start_epoch}."
+        )
+    if opt.start_warmup and remaining_epochs <= opt.warmup_epochs:
+        print(
+            f"[warn] warmup_epochs ({opt.warmup_epochs}) >= remaining_epochs ({remaining_epochs}); "
+            "disable warmup for this run."
+        )
+        use_warmup = False
+    else:
+        use_warmup = opt.start_warmup
+
     if opt.cos_restart_cyclic:
-        if opt.start_warmup:
-            scheduler_step = CosineAnnealingRestartCyclicLR(optimizer=optimizer, periods=[(opt.nEpochs//4)-opt.warmup_epochs, (opt.nEpochs*3)//4], restart_weights=[1,1],eta_mins=[0.0002,0.0000001])
-            scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=opt.warmup_epochs, after_scheduler=scheduler_step)
+        p1 = max(1, (remaining_epochs // 4) - (opt.warmup_epochs if use_warmup else 0))
+        p2 = max(1, (remaining_epochs * 3) // 4)
+        if use_warmup:
+            scheduler_step = CosineAnnealingRestartCyclicLR(
+                optimizer=optimizer,
+                periods=[p1, p2],
+                restart_weights=[1, 1],
+                eta_mins=[0.0002, 0.0000001],
+            )
+            scheduler = GradualWarmupScheduler(
+                optimizer, multiplier=1, total_epoch=opt.warmup_epochs, after_scheduler=scheduler_step
+            )
         else:
-            scheduler = CosineAnnealingRestartCyclicLR(optimizer=optimizer, periods=[opt.nEpochs//4, (opt.nEpochs*3)//4], restart_weights=[1,1],eta_mins=[0.0002,0.0000001])
+            scheduler = CosineAnnealingRestartCyclicLR(
+                optimizer=optimizer,
+                periods=[p1, p2],
+                restart_weights=[1, 1],
+                eta_mins=[0.0002, 0.0000001],
+            )
     elif opt.cos_restart:
-        if opt.start_warmup:
-            scheduler_step = CosineAnnealingRestartLR(optimizer=optimizer, periods=[opt.nEpochs - opt.warmup_epochs - opt.start_epoch], restart_weights=[1],eta_min=1e-7)
-            scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=opt.warmup_epochs, after_scheduler=scheduler_step)
+        if use_warmup:
+            scheduler_step = CosineAnnealingRestartLR(
+                optimizer=optimizer,
+                periods=[remaining_epochs - opt.warmup_epochs],
+                restart_weights=[1],
+                eta_min=1e-7,
+            )
+            scheduler = GradualWarmupScheduler(
+                optimizer, multiplier=1, total_epoch=opt.warmup_epochs, after_scheduler=scheduler_step
+            )
         else:
-            scheduler = CosineAnnealingRestartLR(optimizer=optimizer, periods=[opt.nEpochs - opt.start_epoch], restart_weights=[1],eta_min=1e-7)
+            scheduler = CosineAnnealingRestartLR(
+                optimizer=optimizer,
+                periods=[remaining_epochs],
+                restart_weights=[1],
+                eta_min=1e-7,
+            )
     else:
         raise Exception("should choose a scheduler")
     return optimizer,scheduler
@@ -383,7 +492,7 @@ if __name__ == '__main__':
             base.region_attn2.mask_bias_scale_max = None if float(opt.attn_mask_bias_scale2_max) < 0 else float(opt.attn_mask_bias_scale2_max)
 
         # Apply init params only for fresh training (avoid overwriting a resumed checkpoint).
-        if opt.start_epoch == 0:
+        if opt.start_epoch == 0 and not opt.resume:
             if hasattr(base, "region_attn"):
                 base.region_attn.alpha.data.fill_(float(opt.attn_alpha1_init))
                 base.region_attn.mask_bias_scale.data.fill_(float(opt.attn_mask_bias_scale1_init))
@@ -413,6 +522,9 @@ if __name__ == '__main__':
     log_path = f"./results/training/metrics_{dataset_tag}_{now}.md"
     with open(log_path, "w") as f:
         f.write(f"dataset: {opt.dataset}\n")
+        f.write(f"resume: {opt.resume}\n")
+        f.write(f"load_partial: {opt.load_partial}\n")
+        f.write(f"start_epoch: {opt.start_epoch}\n")
         f.write(f"lr: {opt.lr}\n")
         f.write(f"batch size: {opt.batchSize}\n")
         f.write(f"crop size: {opt.cropSize}\n")
@@ -430,6 +542,10 @@ if __name__ == '__main__':
         f.write(f"rem_weight: {opt.rem_weight}\n")
         f.write(f"use_region_prior: {opt.use_region_prior}\n")
         f.write(f"prior_mode: {opt.prior_mode}\n")
+        f.write(f"pre_lca_film: {opt.pre_lca_film}\n")
+        f.write(f"pre_lca_film_scale: {opt.pre_lca_film_scale}\n")
+        f.write(f"pre_lca_film_bias: {opt.pre_lca_film_bias}\n")
+        f.write(f"pre_lca_film_alpha: {opt.pre_lca_film_alpha}\n")
         f.write(f"glib_on_i: {opt.glib_on_i}\n")
         f.write(f"glib_on_hv: {opt.glib_on_hv}\n")
         f.write(f"use_wtconv_i: {opt.use_wtconv_i}\n")

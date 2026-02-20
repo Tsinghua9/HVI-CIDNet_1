@@ -298,6 +298,56 @@ class RegionFiLM(nn.Module):
         return out
 
 
+class MaskFiLM(nn.Module):
+    """
+    Lightweight mask-conditioned FiLM using only the region mask.
+
+    Steps:
+      index_map -> one_hot (B,K,H,W) -> 1x1 conv -> (gamma,beta)
+      out = x + a * ( (1+scale*tanh(gamma))*x + bias*tanh(beta) - x )
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        max_regions: int,
+        scale: float = 0.1,
+        bias: float = 0.1,
+        init_alpha: float = -2.197225,
+    ):
+        super().__init__()
+        self.channels = int(channels)
+        self.max_regions = int(max_regions)
+        self.scale = float(scale)
+        self.bias = float(bias)
+        self.proj = nn.Conv2d(self.max_regions, self.channels * 2, kernel_size=1, stride=1, padding=0, bias=True)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+        self.alpha = nn.Parameter(torch.tensor(float(init_alpha)))
+
+    def forward(self, feat: torch.Tensor, index_map: torch.Tensor) -> torch.Tensor:
+        """
+        feat: (B,C,H,W)
+        index_map: (B,H0,W0) int64
+        """
+        b, c, h, w = feat.shape
+        if index_map is None:
+            return feat
+        # clip to valid range, then one-hot
+        idx = index_map.clamp(min=0, max=self.max_regions - 1)
+        one_hot = F.one_hot(idx, num_classes=self.max_regions).permute(0, 3, 1, 2).float()
+        if one_hot.shape[-2:] != (h, w):
+            one_hot = F.interpolate(one_hot, size=(h, w), mode="bilinear", align_corners=True)
+            one_hot = one_hot.clamp_min(0.0)
+        cond = self.proj(one_hot)
+        gamma, beta = cond.chunk(2, dim=1)
+        gamma = 1.0 + self.scale * torch.tanh(gamma)
+        beta = self.bias * torch.tanh(beta)
+        mod = gamma * feat + beta
+        a = torch.sigmoid(self.alpha)
+        return feat + a * (mod - feat)
+
+
 # -------------------------------------------------------------
 # Global-Local Interaction Block (GLIB)
 # -------------------------------------------------------------

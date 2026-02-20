@@ -9,6 +9,7 @@ from net.prior_modules import (
     RegionPooling,
     RegionPolicyMLP,
     RegionFiLM,
+    MaskFiLM,
     RegionCrossAttention,
     BoundaryMap,
     StructureGate,
@@ -38,6 +39,11 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  attn_mask_bias_scale1_max=1.0,
                  attn_mask_bias_scale2_max=0.65,
                  lca_type='cab',
+                 max_regions: int = 32,
+                 pre_lca_film: bool = False,
+                 pre_lca_film_scale: float = 0.1,
+                 pre_lca_film_bias: float = 0.1,
+                 pre_lca_film_alpha: float = -2.197225,
                  glib_on_i: bool = True,
                  glib_on_hv: bool = False):
         super(CIDNet, self).__init__()
@@ -149,6 +155,25 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
 
         self.trans = RGB_HVI()
 
+        # Pre-LCA mask-conditioned FiLM (I branch, shallow stages)
+        self.pre_lca_film = bool(pre_lca_film)
+        self.max_regions = int(max_regions)
+        if self.pre_lca_film:
+            self.pre_lca_film1 = MaskFiLM(
+                ch2,
+                max_regions=self.max_regions,
+                scale=pre_lca_film_scale,
+                bias=pre_lca_film_bias,
+                init_alpha=pre_lca_film_alpha,
+            )
+            self.pre_lca_film2 = MaskFiLM(
+                ch3,
+                max_regions=self.max_regions,
+                scale=pre_lca_film_scale,
+                bias=pre_lca_film_bias,
+                init_alpha=pre_lca_film_alpha,
+            )
+
         # Region prior modules (used when index_map is provided)
         self.soft_mask = SoftRegionMask()
         self.region_pool = RegionPooling()
@@ -194,6 +219,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         i_jump0 = i_enc0
         hv_jump0 = hv_0
 
+        if self.pre_lca_film and index_map is not None:
+            i_enc1 = self.pre_lca_film1(i_enc1, index_map)
         i_enc2 = lca_call(self.I_LCA1, i_enc1, hv_1)
         # Apply region prior after first cross-branch interaction (safer than pre-LCA)
         if index_map is not None and prior_mode != 'glib':
@@ -221,6 +248,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         i_enc2 = self.IE_block2(i_enc2)
         hv_2 = self.HVE_block2(hv_2)
 
+        if self.pre_lca_film and index_map is not None:
+            i_enc2 = self.pre_lca_film2(i_enc2, index_map)
         i_enc3 = lca_call(self.I_LCA2, i_enc2, hv_2)
         hv_3 = lca_call(self.HV_LCA2, hv_2, i_enc2)
         v_jump2 = i_enc3
