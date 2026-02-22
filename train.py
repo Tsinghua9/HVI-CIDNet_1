@@ -399,7 +399,22 @@ def build_model():
     return model
 
 def make_scheduler():
-    optimizer = optim.Adam(model.parameters(), lr=opt.lr)
+    if opt.optim in ["adam", "adamw"]:
+        betas = (opt.beta1, opt.beta2)
+        if opt.optim == "adamw":
+            optimizer = optim.AdamW(model.parameters(), lr=opt.lr, betas=betas, weight_decay=opt.weight_decay)
+        else:
+            optimizer = optim.Adam(model.parameters(), lr=opt.lr, betas=betas, weight_decay=opt.weight_decay)
+    elif opt.optim == "sgd":
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=opt.lr,
+            momentum=opt.momentum,
+            weight_decay=opt.weight_decay,
+            nesterov=opt.nesterov,
+        )
+    else:
+        raise ValueError(f"Unknown optimizer: {opt.optim}")
     remaining_epochs = opt.nEpochs
     if not opt.resume:
         remaining_epochs = opt.nEpochs - opt.start_epoch
@@ -526,6 +541,12 @@ if __name__ == '__main__':
         f.write(f"load_partial: {opt.load_partial}\n")
         f.write(f"start_epoch: {opt.start_epoch}\n")
         f.write(f"lr: {opt.lr}\n")
+        f.write(f"optim: {opt.optim}\n")
+        f.write(f"weight_decay: {opt.weight_decay}\n")
+        f.write(f"beta1: {opt.beta1}\n")
+        f.write(f"beta2: {opt.beta2}\n")
+        f.write(f"momentum: {opt.momentum}\n")
+        f.write(f"nesterov: {opt.nesterov}\n")
         f.write(f"batch size: {opt.batchSize}\n")
         f.write(f"crop size: {opt.cropSize}\n")
         f.write(f"HVI_weight: {opt.HVI_weight}\n")

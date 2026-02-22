@@ -20,6 +20,13 @@ def option():
                         help='allow partial state_dict loading (ignore missing/mismatched keys)')
     parser.add_argument('--snapshots', type=int, default=20, help='Snapshots for save checkpoints pth')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning Rate')
+    parser.add_argument('--optim', type=str, default='adam', choices=['adam', 'adamw', 'sgd'],
+                        help='optimizer type')
+    parser.add_argument('--weight_decay', type=float, default=0.0, help='weight decay for optimizer')
+    parser.add_argument('--beta1', type=float, default=0.9, help='beta1 for Adam/AdamW')
+    parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for Adam/AdamW')
+    parser.add_argument('--momentum', type=float, default=0.9, help='momentum for SGD')
+    parser.add_argument('--nesterov', type=_str2bool, default=False, help='use Nesterov for SGD')
     parser.add_argument('--gpu_mode', type=_str2bool, default=True)
     parser.add_argument('--shuffle', type=_str2bool, default=True)
     parser.add_argument('--threads', type=int, default=16, help='number of threads for dataloader to use')
