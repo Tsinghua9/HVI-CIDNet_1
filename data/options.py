@@ -51,6 +51,12 @@ def option():
                         help='FiLM bias strength for pre-LCA modulation')
     parser.add_argument('--pre_lca_film_alpha', type=float, default=-2.197225,
                         help='FiLM residual gate alpha for pre-LCA modulation')
+    parser.add_argument('--pre_lca_film_branches', type=str, default='i', choices=['i', 'hv', 'both'],
+                        help='which branches to apply pre-LCA FiLM: i, hv, or both')
+    parser.add_argument('--pre_lca_film_layers', type=str, default='12', choices=['12', 'all'],
+                        help='which LCA layers to apply pre-LCA FiLM: 12 (LCA1/2) or all')
+    parser.add_argument('--pre_lca_film_depth_decay', type=float, default=0.7,
+                        help='depth decay factor for pre-LCA FiLM on LCA3+ when layers=all')
 
     # region prior hyperparams (for tuning / reproducibility)
     parser.add_argument('--max_regions', type=int, default=32,
@@ -110,11 +116,11 @@ def option():
     parser.add_argument('--val_folder', default='./results/', help='Location to save validation datasets')
 
     # loss weights
-    parser.add_argument('--HVI_weight', type=float, default=1.0)
-    parser.add_argument('--L1_weight', type=float, default=1.0)
-    parser.add_argument('--D_weight',  type=float, default=0.5)
-    parser.add_argument('--E_weight',  type=float, default=50.0)
-    parser.add_argument('--P_weight',  type=float, default=1e-2)
+    # parser.add_argument('--HVI_weight', type=float, default=1.0)
+    # parser.add_argument('--L1_weight', type=float, default=1.0)
+    # parser.add_argument('--D_weight',  type=float, default=0.5)
+    # parser.add_argument('--E_weight',  type=float, default=50.0)
+    # parser.add_argument('--P_weight',  type=float, default=1e-2)
     parser.add_argument('--loss_gtmean_rgb', type=_str2bool, default=False, help='enable GT-Mean L1 loss for RGB branch')
     parser.add_argument('--loss_gtmean_hvi', type=_str2bool, default=False, help='enable GT-Mean L1 loss for HVI branch')
     parser.add_argument('--gtmean_warmup_ratio', type=float, default=0.3, help='fraction of epochs using GTMean before switching off')
@@ -124,11 +130,11 @@ def option():
     parser.add_argument('--loss_edge', type=_str2bool, default=True, help='enable EdgeLoss (set False to simplify when using REM)')
     parser.add_argument('--loss_rem', type=_str2bool, default=False, help='enable Region Exposure Matching (REM) loss')
     parser.add_argument('--rem_weight', type=float, default=0.1, help='weight for REM loss')
-    # parser.add_argument('--HVI_weight', type=float, default=1.0)
-    # parser.add_argument('--L1_weight', type=float, default=0)
-    # parser.add_argument('--D_weight',  type=float, default=0)
-    # parser.add_argument('--E_weight',  type=float, default=0)
-    # parser.add_argument('--P_weight',  type=float, default=1e-2)
+    parser.add_argument('--HVI_weight', type=float, default=1.0)
+    parser.add_argument('--L1_weight', type=float, default=0)
+    parser.add_argument('--D_weight',  type=float, default=0)
+    parser.add_argument('--E_weight',  type=float, default=0)
+    parser.add_argument('--P_weight',  type=float, default=1e-2)
     
     # use random gamma function (enhancement curve) to improve generalization
     parser.add_argument('--gamma', type=_str2bool, default=False)

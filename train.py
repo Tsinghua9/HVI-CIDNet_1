@@ -391,6 +391,9 @@ def build_model():
                    pre_lca_film_scale=opt.pre_lca_film_scale,
                    pre_lca_film_bias=opt.pre_lca_film_bias,
                    pre_lca_film_alpha=opt.pre_lca_film_alpha,
+                   pre_lca_film_branches=opt.pre_lca_film_branches,
+                   pre_lca_film_layers=opt.pre_lca_film_layers,
+                   pre_lca_film_depth_decay=opt.pre_lca_film_depth_decay,
                    glib_on_i=opt.glib_on_i,
                    glib_on_hv=opt.glib_on_hv).cuda()
     resume_path = _resolve_resume_path()
@@ -567,6 +570,9 @@ if __name__ == '__main__':
         f.write(f"pre_lca_film_scale: {opt.pre_lca_film_scale}\n")
         f.write(f"pre_lca_film_bias: {opt.pre_lca_film_bias}\n")
         f.write(f"pre_lca_film_alpha: {opt.pre_lca_film_alpha}\n")
+        f.write(f"pre_lca_film_branches: {opt.pre_lca_film_branches}\n")
+        f.write(f"pre_lca_film_layers: {opt.pre_lca_film_layers}\n")
+        f.write(f"pre_lca_film_depth_decay: {opt.pre_lca_film_depth_decay}\n")
         f.write(f"glib_on_i: {opt.glib_on_i}\n")
         f.write(f"glib_on_hv: {opt.glib_on_hv}\n")
         f.write(f"use_wtconv_i: {opt.use_wtconv_i}\n")

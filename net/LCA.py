@@ -41,6 +41,59 @@ class CAB(nn.Module):
 
         out = self.project_out(out)
         return out
+
+
+class CrossGuidedCAB(nn.Module):
+    def __init__(self, dim, num_heads, bias):
+        super(CrossGuidedCAB, self).__init__()
+        self.num_heads = num_heads
+        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
+
+        qv_in = dim
+        kv_in = dim
+
+        self.qv = nn.Conv2d(qv_in, dim * 2, kernel_size=1, bias=bias)
+        self.qv_dwconv = nn.Conv2d(dim * 2, dim * 2, kernel_size=3, stride=1, padding=1,
+                                   groups=dim * 2, bias=bias)
+        self.kv = nn.Conv2d(kv_in, dim * 2, kernel_size=1, bias=bias)
+        self.kv_dwconv = nn.Conv2d(dim * 2, dim * 2, kernel_size=3, stride=1, padding=1,
+                                   groups=dim * 2, bias=bias)
+        self.v_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1, bias=bias)
+        self.project_out = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+
+    def forward(self, x, y):
+        b, c, h, w = x.shape
+
+        qv_in = x
+        kv_in = y
+
+        qv_ = self.qv_dwconv(self.qv(qv_in))
+        kv_ = self.kv_dwconv(self.kv(kv_in))
+        q, v_ = qv_.chunk(2, dim=1)
+        k, v = kv_.chunk(2, dim=1)
+
+        v = self.v_fuse(torch.cat([v, v_], dim=1))
+
+        q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+        k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+        v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+
+        q = torch.nn.functional.normalize(q, dim=-1)
+        k = torch.nn.functional.normalize(k, dim=-1)
+
+        attn = (q @ k.transpose(-2, -1)) * self.temperature
+        attn = nn.functional.softmax(attn, dim=-1)
+
+        out = (attn @ v)
+        out = rearrange(
+            out,
+            'b head c (h w) -> b (head c) h w',
+            head=self.num_heads,
+            h=h,
+            w=w,
+        )
+        out = self.project_out(out)
+        return out
     
 
 # Intensity Enhancement Layer
@@ -159,7 +212,7 @@ class MFEM(nn.Module):
 class CDEM(nn.Module):
     def __init__(self, dim, num_heads, ffn_expansion=2.0, bias=False):
         super().__init__()
-        self.attn = CAB(dim, num_heads, bias=bias)
+        self.attn = CrossGuidedCAB(dim, num_heads, bias=bias)
         hidden = max(int(dim * ffn_expansion), dim)
         self.ffn = nn.Sequential(
             nn.Conv2d(dim, hidden, kernel_size=1, bias=bias),

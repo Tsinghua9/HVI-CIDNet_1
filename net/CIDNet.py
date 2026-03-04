@@ -44,6 +44,9 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  pre_lca_film_scale: float = 0.1,
                  pre_lca_film_bias: float = 0.1,
                  pre_lca_film_alpha: float = -2.197225,
+                 pre_lca_film_branches: str = 'i',
+                 pre_lca_film_layers: str = '12',
+                 pre_lca_film_depth_decay: float = 0.7,
                  glib_on_i: bool = True,
                  glib_on_hv: bool = False):
         super(CIDNet, self).__init__()
@@ -155,24 +158,46 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
 
         self.trans = RGB_HVI()
 
-        # Pre-LCA mask-conditioned FiLM (I branch, shallow stages)
+        # Pre-LCA mask-conditioned FiLM (configurable branches/layers)
         self.pre_lca_film = bool(pre_lca_film)
+        self.pre_lca_film_branches = str(pre_lca_film_branches).lower()
+        self.pre_lca_film_layers = str(pre_lca_film_layers).lower()
+        self.pre_lca_film_depth_decay = float(pre_lca_film_depth_decay)
         self.max_regions = int(max_regions)
+        self.pre_lca_film_i = nn.ModuleDict()
+        self.pre_lca_film_hv = nn.ModuleDict()
         if self.pre_lca_film:
-            self.pre_lca_film1 = MaskFiLM(
-                ch2,
-                max_regions=self.max_regions,
-                scale=pre_lca_film_scale,
-                bias=pre_lca_film_bias,
-                init_alpha=pre_lca_film_alpha,
-            )
-            self.pre_lca_film2 = MaskFiLM(
-                ch3,
-                max_regions=self.max_regions,
-                scale=pre_lca_film_scale,
-                bias=pre_lca_film_bias,
-                init_alpha=pre_lca_film_alpha,
-            )
+            if self.pre_lca_film_branches not in {"i", "hv", "both"}:
+                raise ValueError(f"Unknown pre_lca_film_branches: {self.pre_lca_film_branches}")
+            if self.pre_lca_film_layers not in {"12", "all"}:
+                raise ValueError(f"Unknown pre_lca_film_layers: {self.pre_lca_film_layers}")
+
+            i_ch = {1: ch2, 2: ch3, 3: ch4, 4: ch4, 5: ch3, 6: ch2}
+            hv_ch = {1: ch2, 2: ch3, 3: ch4, 4: ch4, 5: ch3, 6: ch2}
+            if self.pre_lca_film_layers == "12":
+                layers = [1, 2]
+            else:
+                layers = [1, 2, 3, 4, 5, 6]
+
+            def _mult(idx):
+                return 1.0 if idx in (1, 2) else self.pre_lca_film_depth_decay
+
+            def _add(module_dict, idx, ch):
+                mult = _mult(idx)
+                module_dict[str(idx)] = MaskFiLM(
+                    ch,
+                    max_regions=self.max_regions,
+                    scale=pre_lca_film_scale * mult,
+                    bias=pre_lca_film_bias * mult,
+                    init_alpha=pre_lca_film_alpha,
+                )
+
+            if self.pre_lca_film_branches in {"i", "both"}:
+                for idx in layers:
+                    _add(self.pre_lca_film_i, idx, i_ch[idx])
+            if self.pre_lca_film_branches in {"hv", "both"}:
+                for idx in layers:
+                    _add(self.pre_lca_film_hv, idx, hv_ch[idx])
 
         # Region prior modules (used when index_map is provided)
         self.soft_mask = SoftRegionMask()
@@ -208,6 +233,17 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
 
         def lca_call(module, a, b):
             return module(a, b)
+        def _apply_pre_film(branch, idx, feat):
+            if not self.pre_lca_film or index_map is None:
+                return feat
+            key = str(idx)
+            if branch == "i":
+                if key in self.pre_lca_film_i:
+                    return self.pre_lca_film_i[key](feat, index_map)
+            else:
+                if key in self.pre_lca_film_hv:
+                    return self.pre_lca_film_hv[key](feat, index_map)
+            return feat
         # low
         # Intensity分支
         i_enc0 = self.IE_block0(i)
@@ -219,8 +255,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         i_jump0 = i_enc0
         hv_jump0 = hv_0
 
-        if self.pre_lca_film and index_map is not None:
-            i_enc1 = self.pre_lca_film1(i_enc1, index_map)
+        i_enc1 = _apply_pre_film("i", 1, i_enc1)
+        hv_1 = _apply_pre_film("hv", 1, hv_1)
         i_enc2 = lca_call(self.I_LCA1, i_enc1, hv_1)
         # Apply region prior after first cross-branch interaction (safer than pre-LCA)
         if index_map is not None and prior_mode != 'glib':
@@ -248,8 +284,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         i_enc2 = self.IE_block2(i_enc2)
         hv_2 = self.HVE_block2(hv_2)
 
-        if self.pre_lca_film and index_map is not None:
-            i_enc2 = self.pre_lca_film2(i_enc2, index_map)
+        i_enc2 = _apply_pre_film("i", 2, i_enc2)
+        hv_2 = _apply_pre_film("hv", 2, hv_2)
         i_enc3 = lca_call(self.I_LCA2, i_enc2, hv_2)
         hv_3 = lca_call(self.HV_LCA2, hv_2, i_enc2)
         v_jump2 = i_enc3
@@ -282,6 +318,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
             hv_3 = self.HV_GLIB2(hv_3, index_map)
 
+        i_enc3 = _apply_pre_film("i", 3, i_enc3)
+        hv_3 = _apply_pre_film("hv", 3, hv_3)
         i_enc4 = lca_call(self.I_LCA3, i_enc3, hv_3)
         hv_4 = lca_call(self.HV_LCA3, hv_3, i_enc3)
 
@@ -290,6 +328,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
             hv_4 = self.HV_GLIB3(hv_4, index_map)
 
+        i_enc4 = _apply_pre_film("i", 4, i_enc4)
+        hv_4 = _apply_pre_film("hv", 4, hv_4)
         i_dec4 = lca_call(self.I_LCA4, i_enc4, hv_4)
         hv_4 = lca_call(self.HV_LCA4, hv_4, i_enc4)
 
@@ -301,6 +341,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
             hv_3 = self.HV_GLIB4(hv_3, index_map)
 
+        i_dec3 = _apply_pre_film("i", 5, i_dec3)
+        hv_3 = _apply_pre_film("hv", 5, hv_3)
         i_dec2 = lca_call(self.I_LCA5, i_dec3, hv_3)
         hv_2 = lca_call(self.HV_LCA5, hv_3, i_dec3)
 
@@ -315,6 +357,8 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         if index_map is not None and prior_mode == 'glib' and self.glib_on_hv:
             hv_2 = self.HV_GLIB5(hv_2, index_map)
 
+        i_dec2 = _apply_pre_film("i", 6, i_dec2)
+        hv_2 = _apply_pre_film("hv", 6, hv_2)
         i_dec1 = lca_call(self.I_LCA6, i_dec2, hv_2)
         hv_1 = lca_call(self.HV_LCA6, hv_2, i_dec2)
 
