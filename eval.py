@@ -1,5 +1,6 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+if 'CUDA_VISIBLE_DEVICES' not in os.environ:
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import argparse
 from tqdm import tqdm
 from data.data import *
@@ -7,6 +8,17 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from loss.losses import *
 from net.CIDNet import CIDNet
+
+
+def _str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
 def eval(model, testing_data_loader, model_path, output_folder,norm_size=True,LOL=False,v2=False,unpaired=False,alpha=1.0,gamma=1.0):
@@ -76,6 +88,26 @@ if __name__ == '__main__':
     eval_parser.add_argument('--alpha', type=float, default=1.0)
     eval_parser.add_argument('--gamma', type=float, default=1.0)
     eval_parser.add_argument('--unpaired_weights', type=str, default='./weights/LOLv2_syn/w_perc.pth')
+    eval_parser.add_argument('--weights', type=str, default=None, help='override weight path')
+
+    # model structure options (must match training)
+    eval_parser.add_argument('--fe_type', type=str, default='legacy', choices=['legacy', 'dual_gate'])
+    eval_parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'diem', 'waveformer'])
+    eval_parser.add_argument('--use_wtconv_i', type=_str2bool, default=True)
+    eval_parser.add_argument('--use_dwconv_hv', type=_str2bool, default=False)
+    eval_parser.add_argument('--pre_lca_film', type=_str2bool, default=False)
+    eval_parser.add_argument('--pre_lca_film_scale', type=float, default=0.1)
+    eval_parser.add_argument('--pre_lca_film_bias', type=float, default=0.1)
+    eval_parser.add_argument('--pre_lca_film_alpha', type=float, default=-2.197225)
+    eval_parser.add_argument('--glib_on_i', type=_str2bool, default=True)
+    eval_parser.add_argument('--glib_on_hv', type=_str2bool, default=False)
+    eval_parser.add_argument('--attn_alpha1_init', type=float, default=-2.197225)
+    eval_parser.add_argument('--attn_alpha2_init', type=float, default=-2.197225)
+    eval_parser.add_argument('--attn_mask_bias_scale1_init', type=float, default=1.0)
+    eval_parser.add_argument('--attn_mask_bias_scale2_init', type=float, default=1.0)
+    eval_parser.add_argument('--attn_mask_bias_scale1_max', type=float, default=1.0)
+    eval_parser.add_argument('--attn_mask_bias_scale2_max', type=float, default=0.65)
+    eval_parser.add_argument('--max_regions', type=int, default=32)
 
     ep = eval_parser.parse_args()
 
@@ -96,7 +128,7 @@ if __name__ == '__main__':
         if ep.perc:
             weight_path = './weights/LOLv1/w_perc.pth'
         else:
-            weight_path = '/home/zqh/code/HVI-CIDNet_1/weights/LOLv1/attn/epoch_640.pth'
+            weight_path = '/home/zqh/code/HVI-CIDNet_1/weights/LOLv1/best_metrics_lol_v1_2026-02-23_14-39-20/epoch_1300.pth'
         
             
     elif ep.lol_v2_real:
@@ -160,7 +192,27 @@ if __name__ == '__main__':
         alpha = ep.alpha
         norm_size = False
         weight_path = ep.unpaired_weights
+    
+    if ep.weights is not None:
+        weight_path = ep.weights
         
-    eval_net = CIDNet().cuda()
+    eval_net = CIDNet(
+        fe_type=ep.fe_type,
+        lca_type=ep.lca_type,
+        use_wtconv_i=ep.use_wtconv_i,
+        use_dwconv_hv=ep.use_dwconv_hv,
+        pre_lca_film=ep.pre_lca_film,
+        pre_lca_film_scale=ep.pre_lca_film_scale,
+        pre_lca_film_bias=ep.pre_lca_film_bias,
+        pre_lca_film_alpha=ep.pre_lca_film_alpha,
+        glib_on_i=ep.glib_on_i,
+        glib_on_hv=ep.glib_on_hv,
+        attn_alpha1_init=ep.attn_alpha1_init,
+        attn_alpha2_init=ep.attn_alpha2_init,
+        attn_mask_bias_scale1_init=ep.attn_mask_bias_scale1_init,
+        attn_mask_bias_scale2_init=ep.attn_mask_bias_scale2_init,
+        attn_mask_bias_scale1_max=ep.attn_mask_bias_scale1_max,
+        attn_mask_bias_scale2_max=ep.attn_mask_bias_scale2_max,
+        max_regions=ep.max_regions,
+    ).cuda()
     eval(eval_net, eval_data, weight_path, output_folder,norm_size=norm_size,LOL=ep.lol,v2=ep.lol_v2_real,unpaired=ep.unpaired,alpha=alpha,gamma=ep.gamma)
-
