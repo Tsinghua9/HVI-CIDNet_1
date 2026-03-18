@@ -62,6 +62,20 @@ def calculate_psnr(target, ref):
     psnr = 10.0 * np.log10(255.0 * 255.0 / (np.mean(np.square(diff)) + 1e-8))
     return psnr
 
+def _resolve_label_path(label_dir, name):
+    base, ext = os.path.splitext(name)
+    candidates = [
+        os.path.join(label_dir, name),
+        os.path.join(label_dir, base + ".JPG"),
+        os.path.join(label_dir, base + ".jpg"),
+        os.path.join(label_dir, base + ".png"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def metrics(im_dir, label_dir, use_GT_mean):
     avg_psnr = 0
     avg_ssim = 0
@@ -82,7 +96,10 @@ def metrics(im_dir, label_dir, use_GT_mean):
         else:
             name = item.split('/')[-1]
             
-        im2 = Image.open(label_dir + name).convert('RGB')
+        label_path = _resolve_label_path(label_dir, name)
+        if label_path is None:
+            raise FileNotFoundError(f"Label not found for {name} in {label_dir}")
+        im2 = Image.open(label_path).convert('RGB')
         (h, w) = im2.size
         im1 = im1.resize((h, w))  
         im1 = np.array(im1) 

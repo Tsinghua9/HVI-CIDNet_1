@@ -355,11 +355,23 @@ def load_datasets():
         test_set = get_eval_set(opt.data_val_SID)
         
     elif opt.dataset == 'SICE_mix':
-        train_set = get_SICE_training_set(opt.data_train_SICE,size=opt.cropSize)
+        train_set = get_SICE_training_set(
+            opt.data_train_SICE,
+            size=opt.cropSize,
+            label_dir=opt.prior_label_dir,
+            use_prior=opt.use_region_prior,
+            max_regions=opt.max_regions,
+        )
         test_set = get_SICE_eval_set(opt.data_val_SICE_mix)
         
     elif opt.dataset == 'SICE_grad':
-        train_set = get_SICE_training_set(opt.data_train_SICE,size=opt.cropSize)
+        train_set = get_SICE_training_set(
+            opt.data_train_SICE,
+            size=opt.cropSize,
+            label_dir=opt.prior_label_dir,
+            use_prior=opt.use_region_prior,
+            max_regions=opt.max_regions,
+        )
         test_set = get_SICE_eval_set(opt.data_val_SICE_grad)
         
     elif opt.dataset == 'fivek':
@@ -683,7 +695,11 @@ if __name__ == '__main__':
                 label_dir = opt.data_valgt_fivek
                 norm_size = False
 
-            im_dir = opt.val_folder + output_folder + '*.png'
+            # SICE outputs keep original suffix (e.g., .JPG), so use a broad glob.
+            if opt.dataset in ['SICE_mix', 'SICE_grad']:
+                im_dir = opt.val_folder + output_folder + '*.*'
+            else:
+                im_dir = opt.val_folder + output_folder + '*.png'
             is_lol_v1 = (opt.dataset == 'lol_v1')
             is_lolv2_real = (opt.dataset == 'lolv2_real')
             eval(model, testing_data_loader, model_out_path, opt.val_folder+output_folder, 
