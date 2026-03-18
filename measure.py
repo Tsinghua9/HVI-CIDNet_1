@@ -68,6 +68,7 @@ def _resolve_label_path(label_dir, name):
         os.path.join(label_dir, name),
         os.path.join(label_dir, base + ".JPG"),
         os.path.join(label_dir, base + ".jpg"),
+        os.path.join(label_dir, base + ".PNG"),
         os.path.join(label_dir, base + ".png"),
     ]
     for path in candidates:
