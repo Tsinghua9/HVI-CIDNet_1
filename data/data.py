@@ -47,8 +47,14 @@ def get_lol_v2_syn_training_set(data_dir, size, label_dir=None, use_prior=False,
     )
 
 
-def get_SID_training_set(data_dir,size):
-    return SIDDatasetFromFolder(data_dir, transform=transform1(size))
+def get_SID_training_set(data_dir,size,label_dir=None,use_prior=False,max_regions: int = 16):
+    return SIDDatasetFromFolder(
+        data_dir,
+        size=size,
+        label_dir=label_dir,
+        return_index_map=use_prior,
+        max_regions=max_regions,
+    )
 
 
 def get_SICE_training_set(data_dir,size,label_dir=None,use_prior=False,max_regions: int = 16):

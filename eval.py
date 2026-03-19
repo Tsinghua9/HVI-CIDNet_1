@@ -72,6 +72,7 @@ if __name__ == '__main__':
     eval_parser.add_argument('--SICE_grad', action='store_true', help='output SICE_grad dataset')
     eval_parser.add_argument('--SICE_mix', action='store_true', help='output SICE_mix dataset')
     eval_parser.add_argument('--fivek', action='store_true', help='output FiveK dataset')
+    eval_parser.add_argument('--SID', action='store_true', help='output SID dataset')
 
     eval_parser.add_argument('--best_GT_mean', action='store_true', help='output lol_v2_real dataset best_GT_mean')
     eval_parser.add_argument('--best_PSNR', action='store_true', help='output lol_v2_real dataset best_PSNR')
@@ -168,6 +169,11 @@ if __name__ == '__main__':
         output_folder = './output/SICE_mix/'
         weight_path = './weights/SICE.pth'
         norm_size = False
+        
+    elif ep.SID:
+        eval_data = DataLoader(dataset=get_eval_set("./datasets/Sony_total_dark/eval/short"), num_workers=num_workers, batch_size=1, shuffle=False)
+        output_folder = './output/SID/'
+        weight_path = './weights/SID/epoch_150.pth'
         
     elif ep.fivek:
         eval_data = DataLoader(dataset=get_SICE_eval_set("./datasets/FiveK/test/input"), num_workers=num_workers, batch_size=1, shuffle=False)

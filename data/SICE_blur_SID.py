@@ -52,10 +52,16 @@ class LOLBlurDatasetFromFolder(data.Dataset):
     
 
 class SIDDatasetFromFolder(data.Dataset):
-    def __init__(self, data_dir, transform=None):
+    def __init__(self, data_dir, size=256, transform=None, mask_transform=None, label_dir=None,
+                 return_index_map=False, max_regions: int = 16):
         super(SIDDatasetFromFolder, self).__init__()
         self.data_dir = data_dir
-        self.transform = transform
+        self.size = size
+        self.transform = transform or transform1(size)
+        self.mask_transform = mask_transform if mask_transform is not None else transform_mask1(size)
+        self.label_dir = label_dir
+        self.return_index_map = return_index_map
+        self.max_regions = int(max_regions)
 
     def __getitem__(self, index):
         while True:
@@ -80,6 +86,9 @@ class SIDDatasetFromFolder(data.Dataset):
         _, file1 = os.path.split(data_filenames[index1-1])
         _, file2 = os.path.split(data_filenames2[0])
         seed = np.random.randint(random.randint(1, 1000000)) # make a seed with numpy generator 
+        label = None
+        if self.return_index_map:
+            label = self._resolve_label(file1, fill_index)
         if self.transform:
             random.seed(seed) # apply this seed to img tranfsorms
             torch.manual_seed(seed) # needed for torchvision 0.7
@@ -87,10 +96,51 @@ class SIDDatasetFromFolder(data.Dataset):
             random.seed(seed)
             torch.manual_seed(seed)         
             im2 = self.transform(im2)
+            if self.return_index_map:
+                if self.mask_transform is None:
+                    raise RuntimeError("mask_transform must be provided when return_index_map=True")
+                random.seed(seed)
+                torch.manual_seed(seed)
+                label = self.mask_transform(label)
+                label = self._remap_index_map(label, max_regions=self.max_regions)
+        if self.return_index_map:
+            return im1, im2, label, file1, file2
         return im1, im2, file1, file2
 
     def __len__(self):
         return 2099
+
+    def _resolve_label(self, file_name, folder_index):
+        if self.label_dir:
+            base, _ = os.path.splitext(os.path.basename(file_name))
+            folder_path = join(self.label_dir, folder_index)
+            candidates = [
+                join(folder_path, f"{base}_labels.png"),
+                join(folder_path, f"{base}_labels.jpg"),
+                join(folder_path, f"{base}_labels.JPG"),
+            ]
+            for path in candidates:
+                if os.path.exists(path) and os.path.isfile(path):
+                    return Image.open(path).convert('L')
+            raise FileNotFoundError(f"Label file not found for {file_name} in {self.label_dir}")
+        raise FileNotFoundError("label_dir is required for SID when return_index_map=True")
+
+    @staticmethod
+    def _remap_index_map(mask_tensor, max_regions: int = 16):
+        mask_np = mask_tensor.numpy()
+        uniq = np.unique(mask_np)
+        remapped = np.searchsorted(uniq, mask_np)
+        if int(max_regions) > 0:
+            k = int(remapped.max()) + 1 if remapped.size else 0
+            if k > max_regions:
+                counts = np.bincount(remapped.reshape(-1), minlength=k)
+                keep_n = max(int(max_regions) - 1, 1)
+                keep_ids = np.argsort(counts)[::-1][:keep_n]
+                mapping = np.zeros((k,), dtype=np.int64)
+                for new_id, old_id in enumerate(keep_ids, start=1):
+                    mapping[int(old_id)] = int(new_id)
+                remapped = mapping[remapped]
+        return torch.from_numpy(remapped.astype(np.int64))
     
     
     

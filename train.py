@@ -351,7 +351,13 @@ def load_datasets():
         test_set = get_eval_set(opt.data_val_lolv2_syn)
     
     elif opt.dataset == 'SID':
-        train_set = get_SID_training_set(opt.data_train_SID,size=opt.cropSize)
+        train_set = get_SID_training_set(
+            opt.data_train_SID,
+            size=opt.cropSize,
+            label_dir=opt.prior_label_dir,
+            use_prior=opt.use_region_prior,
+            max_regions=opt.max_regions,
+        )
         test_set = get_eval_set(opt.data_val_SID)
         
     elif opt.dataset == 'SICE_mix':
