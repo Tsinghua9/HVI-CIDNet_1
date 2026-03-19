@@ -35,8 +35,12 @@ def option():
     parser.add_argument('--use_dwconv_hv', type=_str2bool, default=False, help='use depthwise separable stem for HV branch')
     parser.add_argument('--fe_type', type=str, default='legacy', choices=['legacy', 'dual_gate'],
                         help='front-end stem type; legacy uses use_wtconv_i/use_dwconv_hv')
+    parser.add_argument('--use_mwfe', type=_str2bool, default=True,
+                        help='enable MWFE stem path (set False for hard ablation)')
     parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'diem', 'waveformer'],
                         help='LCA type: cab (default), diem, or waveformer')
+    parser.add_argument('--use_cbc', type=_str2bool, default=True,
+                        help='enable CBC interaction path (set False for hard ablation)')
     # prior settings
     parser.add_argument('--use_region_prior', type=_str2bool, default=False, help='load label png as region prior')
     parser.add_argument('--prior_label_dir', type=str, default=None, help='label folder; defaults to <train_root>/label if not set')

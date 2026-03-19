@@ -93,7 +93,9 @@ if __name__ == '__main__':
 
     # model structure options (must match training)
     eval_parser.add_argument('--fe_type', type=str, default='legacy', choices=['legacy', 'dual_gate'])
+    eval_parser.add_argument('--use_mwfe', type=_str2bool, default=True)
     eval_parser.add_argument('--lca_type', type=str, default='cab', choices=['cab', 'diem', 'waveformer'])
+    eval_parser.add_argument('--use_cbc', type=_str2bool, default=True)
     eval_parser.add_argument('--use_wtconv_i', type=_str2bool, default=True)
     eval_parser.add_argument('--use_dwconv_hv', type=_str2bool, default=False)
     eval_parser.add_argument('--pre_lca_film', type=_str2bool, default=False)
@@ -209,7 +211,9 @@ if __name__ == '__main__':
         
     eval_net = CIDNet(
         fe_type=ep.fe_type,
+        use_mwfe=ep.use_mwfe,
         lca_type=ep.lca_type,
+        use_cbc=ep.use_cbc,
         use_wtconv_i=ep.use_wtconv_i,
         use_dwconv_hv=ep.use_dwconv_hv,
         pre_lca_film=ep.pre_lca_film,

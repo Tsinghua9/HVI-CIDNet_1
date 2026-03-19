@@ -32,6 +32,7 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  use_wtconv_i=True,
                  use_dwconv_hv=False,
                  fe_type='legacy',
+                 use_mwfe: bool = True,
                  attn_alpha1_init=-2.197225,
                  attn_alpha2_init=-2.197225,
                  attn_mask_bias_scale1_init=1.0,
@@ -39,6 +40,7 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
                  attn_mask_bias_scale1_max=1.0,
                  attn_mask_bias_scale2_max=0.65,
                  lca_type='cab',
+                 use_cbc: bool = True,
                  max_regions: int = 32,
                  pre_lca_film: bool = False,
                  pre_lca_film_scale: float = 0.1,
@@ -54,6 +56,9 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         # 解包通道数和 head 数量，方便后面使用
         [ch1, ch2, ch3, ch4] = channels
         [head1, head2, head3, head4] = heads
+        self.stem_channels = ch1
+        self.use_mwfe = bool(use_mwfe)
+        self.use_cbc = bool(use_cbc)
 
         # -----------------------------------------------------------
         #                HV 分支（H 和 V 通道） - Encoder 部分
@@ -231,7 +236,16 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
         hvi = self.trans.HVIT(x)  # [B, 3, H, W] -> [H,V,I]
         i = hvi[:, 2, :, :].unsqueeze(1).to(dtypes)  # 抽出 I 通道给 I 分支
 
+        def _expand_channels(feat, out_ch):
+            in_ch = feat.shape[1]
+            if in_ch == out_ch:
+                return feat
+            repeat = (out_ch + in_ch - 1) // in_ch
+            return feat.repeat(1, repeat, 1, 1)[:, :out_ch, :, :]
+
         def lca_call(module, a, b):
+            if not self.use_cbc:
+                return a
             return module(a, b)
         def _apply_pre_film(branch, idx, feat):
             if not self.pre_lca_film or index_map is None:
@@ -246,10 +260,16 @@ class CIDNet(nn.Module, PyTorchModelHubMixin):
             return feat
         # low
         # Intensity分支
-        i_enc0 = self.IE_block0(i)
+        if not self.use_mwfe:
+            i_enc0 = _expand_channels(i, self.stem_channels)
+        else:
+            i_enc0 = self.IE_block0(i)
         i_enc1 = self.IE_block1(i_enc0)
         # HV分支
-        hv_0 = self.HVE_block0(hvi)
+        if not self.use_mwfe:
+            hv_0 = _expand_channels(hvi, self.stem_channels)
+        else:
+            hv_0 = self.HVE_block0(hvi)
         hv_1 = self.HVE_block1(hv_0)
         # 用于 skip connection 的跳连特征
         i_jump0 = i_enc0

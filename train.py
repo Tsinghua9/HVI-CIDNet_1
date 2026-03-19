@@ -397,6 +397,7 @@ def build_model():
     model = CIDNet(use_wtconv_i=opt.use_wtconv_i,
                    use_dwconv_hv=opt.use_dwconv_hv,
                    fe_type=opt.fe_type,
+                   use_mwfe=opt.use_mwfe,
                    attn_alpha1_init=opt.attn_alpha1_init,
                    attn_alpha2_init=opt.attn_alpha2_init,
                    attn_mask_bias_scale1_init=opt.attn_mask_bias_scale1_init,
@@ -404,6 +405,7 @@ def build_model():
                    attn_mask_bias_scale1_max=opt.attn_mask_bias_scale1_max,
                    attn_mask_bias_scale2_max=opt.attn_mask_bias_scale2_max,
                    lca_type=opt.lca_type,
+                   use_cbc=opt.use_cbc,
                    max_regions=opt.max_regions,
                    pre_lca_film=opt.pre_lca_film,
                    pre_lca_film_scale=opt.pre_lca_film_scale,
@@ -596,7 +598,9 @@ if __name__ == '__main__':
         f.write(f"use_wtconv_i: {opt.use_wtconv_i}\n")
         f.write(f"use_dwconv_hv: {opt.use_dwconv_hv}\n")
         f.write(f"fe_type: {opt.fe_type}\n")
+        f.write(f"use_mwfe: {opt.use_mwfe}\n")
         f.write(f"lca_type: {opt.lca_type}\n")
+        f.write(f"use_cbc: {opt.use_cbc}\n")
         f.write(f"loss_ccl: {opt.loss_ccl}\n")
         f.write(f"ccl_weight: {opt.ccl_weight}\n")
         f.write(f"prior_label_dir: {opt.prior_label_dir}\n")
