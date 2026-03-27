@@ -18,7 +18,7 @@ def option():
     parser.add_argument('--resume', type=str, default=None, help='checkpoint path to resume from (optional)')
     parser.add_argument('--load_partial', type=_str2bool, default=False,
                         help='allow partial state_dict loading (ignore missing/mismatched keys)')
-    parser.add_argument('--snapshots', type=int, default=10, help='Snapshots for save checkpoints pth')
+    parser.add_argument('--snapshots', type=int, default=50, help='Snapshots for save checkpoints pth')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning Rate')
     parser.add_argument('--optim', type=str, default='adam', choices=['adam', 'adamw', 'sgd'],
                         help='optimizer type')
