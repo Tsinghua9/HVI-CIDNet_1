@@ -165,3 +165,7 @@ weights
 flagged
 output_hf
 datasets
+.agents
+.aris
+AGENTS.md
+rebuttal

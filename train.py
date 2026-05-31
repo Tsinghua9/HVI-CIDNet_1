@@ -305,11 +305,11 @@ def train(epoch):
                 
 
 def checkpoint(epoch):
-    if not os.path.exists("./weights"):          
-        os.mkdir("./weights") 
-    if not os.path.exists("./weights/train"):          
-        os.mkdir("./weights/train")  
-    model_out_path = "./weights/train/epoch_{}.pth".format(epoch)
+    save_dir = opt.save_dir
+    if opt.run_name:
+        save_dir = os.path.join(save_dir, opt.run_name)
+    os.makedirs(save_dir, exist_ok=True)
+    model_out_path = os.path.join(save_dir, "epoch_{}.pth".format(epoch))
     torch.save(model.state_dict(), model_out_path)
     print("Checkpoint saved to {}".format(model_out_path))
     return model_out_path
@@ -561,6 +561,8 @@ if __name__ == '__main__':
     with open(log_path, "w") as f:
         f.write(f"dataset: {opt.dataset}\n")
         f.write(f"resume: {opt.resume}\n")
+        f.write(f"run_name: {opt.run_name}\n")
+        f.write(f"save_dir: {opt.save_dir}\n")
         f.write(f"load_partial: {opt.load_partial}\n")
         f.write(f"start_epoch: {opt.start_epoch}\n")
         f.write(f"lr: {opt.lr}\n")
