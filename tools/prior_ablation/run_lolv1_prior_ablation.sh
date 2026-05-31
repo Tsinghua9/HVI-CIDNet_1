@@ -233,6 +233,8 @@ train_one() {
   elif [[ -f "$ckpt" && "$FORCE_TRAIN" != "1" ]]; then
     echo "[skip train] $variant checkpoint exists: $ckpt"
   else
+    # train.py uses os.mkdir rather than os.makedirs for --val_folder, so create nested parents here.
+    mkdir -p "$RESULT_ROOT/train_val/$variant/"
     local train_args=("${common_train_args[@]}" --run_name "$variant" --val_folder "$RESULT_ROOT/train_val/$variant/")
     if [[ "$use_prior" == "True" ]]; then
       train_args+=(--use_region_prior True --prior_label_dir "$train_label_dir")
