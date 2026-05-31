@@ -1,36 +1,60 @@
 # LOLv1 Prior-source Ablation for ACM MM Rebuttal
 
-This folder contains scripts for the reviewer concern:
+Reviewer concern: semantic injection may rely on SAM/SAM2 mask accuracy. The cleanest rebuttal experiment is to keep **architecture, loss, schedule, and K fixed**, and change only the region-index-map source.
 
-> Semantic injection may rely on SAM/SAM2 segmentation accuracy; evaluate other segmentation/random mask priors.
+## Recommended minimal table
 
-## Recommended experiment
-
-Run a **same-budget retraining ablation** on LOLv1 with the same architecture/loss/schedule/K and change only the region-index source:
-
-| Variant | Meaning | Rebuttal role |
+| Variant | Meaning | Why included |
 |---|---|---|
-| `sam2` | submitted SAM2 region labels | target/source prior |
-| `slic` | SLIC superpixels | alternative non-foundation segmentation prior |
-| `grid` | regular grid regions | non-semantic structured prior |
-| `random` | fixed random Voronoi regions | random mask prior |
-| `no_prior` | no region index map | whether the semantic-prior path helps |
+| `sam2` | Submitted SAM2 labels | main method / expected best prior |
+| `sam1` | SAM1 labels | recognized alternative foundation segmentation model |
+| `random` | fixed random Voronoi masks | directly answers random-mask concern |
+| `no_prior` | no region prior | shows whether region injection helps |
 
-If time is limited, run `EPOCHS=600` for all rows and report it as a same-budget rebuttal ablation. If time allows, set `EPOCHS=1500` to match the submitted training budget.
+`SLIC` and `grid` are still supported by the scripts, but they are fallback/extra controls. For the one-page rebuttal, `SAM2/SAM1/Random/No prior` is enough and easier to explain.
 
-## Server command
+## Server command for your AutoDL paths
+
+Assumed paths:
+
+```text
+Dataset root:      /root/autodl-tmp/LOLdataset
+SAM2 train labels: /root/autodl-tmp/lolv1_label_uint8
+```
+
+Run full-budget ablation if time allows:
 
 ```bash
 cd /path/to/HVI-CIDNet_1
+git checkout ablation && git pull origin ablation
 conda activate CIDNet
 
-# If SAM2 eval labels are not present, set RUN_SAM2_EVAL_GEN=1.
-# If SAM2 train labels are also missing, set RUN_SAM2_TRAIN_GEN=1.
-EPOCHS=600 \
-VARIANTS="sam2 slic grid random no_prior" \
-SAM2_TRAIN_LABEL_DIR=/home/zqh/code/sam2/notebooks/runs/automatic_mask_lolv1_final_packpkl_plus_labels_plus_npz/label_uint8 \
+EPOCHS=1500 \
+SNAPSHOTS=100 \
+VARIANTS="sam2 sam1 random no_prior" \
+LOL_ROOT=/root/autodl-tmp/LOLdataset \
+SAM2_TRAIN_LABEL_DIR=/root/autodl-tmp/lolv1_label_uint8 \
 RUN_SAM2_EVAL_GEN=1 \
+RUN_SAM1_TRAIN_GEN=1 \
+RUN_SAM1_EVAL_GEN=1 \
+SAM2_ROOT=/root/autodl-tmp/sam2 \
+SAM1_ROOT=/root/autodl-tmp/segment-anything \
+SAM1_CKPT=/root/autodl-tmp/sam_vit_h_4b8939.pth \
 bash tools/prior_ablation/run_lolv1_prior_ablation.sh
+```
+
+If the server does not have SAM1 code/checkpoint, either copy/install SAM1, or replace `sam1` with `slic` as a weaker classical segmentation-prior fallback:
+
+```bash
+VARIANTS="sam2 slic random no_prior" ... bash tools/prior_ablation/run_lolv1_prior_ablation.sh
+```
+
+If time is tight, use the submitted SAM2 checkpoint and train only alternatives:
+
+```bash
+SAM2_EXISTING_CKPT=/path/to/epoch_1300.pth \
+VARIANTS="sam2 sam1 random no_prior" \
+... bash tools/prior_ablation/run_lolv1_prior_ablation.sh
 ```
 
 Results are appended to:
@@ -39,16 +63,8 @@ Results are appended to:
 output/rebuttal_prior_ablation_lolv1/summary.csv
 ```
 
-The evaluation script passes the corresponding `index_map` at inference time. This is important because the legacy `eval.py` does not pass region priors.
+The evaluation script passes the corresponding `index_map` during inference. The legacy `eval.py` does not do this, so use `tools/prior_ablation/eval_lolv1_with_prior.py` for this ablation.
 
-## Quick dry run
+## Training parameters
 
-```bash
-DRY_RUN=1 VARIANTS="slic grid random no_prior" bash tools/prior_ablation/run_lolv1_prior_ablation.sh
-```
-
-## Notes for writing rebuttal
-
-- The cleanest claim is: *SAM2 performs best; SLIC/grid/random/no-prior are lower, so the gain is not from arbitrary masks.*
-- If random/grid are close to SAM2, still phrase carefully: *the gated residual design is robust to imperfect priors, while meaningful region priors remain preferable.*
-- Do not mix a full 1500-epoch SAM2 checkpoint with 600-epoch alternatives in the same main table unless clearly labeled.
+The wrapper uses the LOLv1 best-run settings from `best_metrics_lol_v1_2026-02-23_14-39-20.md`: AdamW, lr 2e-4, batch 8, crop 256, HVI/L1/D/E/P = 1.0/1.0/0.5/50/0.01, GTMean-RGB on, CCL weight 0.5, `fe_type=dual_gate`, `lca_type=diem`, `pre_lca_film=True`, `max_regions=16`, and the same attention initialization/clamp settings.

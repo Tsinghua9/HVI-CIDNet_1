@@ -4,7 +4,10 @@
 #
 # Recommended quick run on a server:
 #   conda activate CIDNet
-#   EPOCHS=600 VARIANTS="sam2 slic grid random no_prior" \
+#   EPOCHS=1500 VARIANTS="sam2 sam1 random no_prior" \
+#     LOL_ROOT=/root/autodl-tmp/LOLdataset \
+#     SAM2_TRAIN_LABEL_DIR=/root/autodl-tmp/lolv1_label_uint8 \
+#     RUN_SAM2_EVAL_GEN=1 RUN_SAM1_TRAIN_GEN=1 RUN_SAM1_EVAL_GEN=1 \
 #     bash tools/prior_ablation/run_lolv1_prior_ablation.sh
 #
 # For a full same-budget paper-quality run, set EPOCHS=1500.
@@ -30,16 +33,21 @@ fi
 BATCH_SIZE=${BATCH_SIZE:-8}
 THREADS=${THREADS:-16}
 SEED=${SEED:-42}
-VARIANTS=${VARIANTS:-"sam2 slic grid random no_prior"}
+VARIANTS=${VARIANTS:-"sam2 sam1 random no_prior"}
 DRY_RUN=${DRY_RUN:-0}
 FORCE_TRAIN=${FORCE_TRAIN:-0}
 FORCE_LABELS=${FORCE_LABELS:-0}
 RUN_SAM2_TRAIN_GEN=${RUN_SAM2_TRAIN_GEN:-0}
 RUN_SAM2_EVAL_GEN=${RUN_SAM2_EVAL_GEN:-0}
+RUN_SAM1_TRAIN_GEN=${RUN_SAM1_TRAIN_GEN:-0}
+RUN_SAM1_EVAL_GEN=${RUN_SAM1_EVAL_GEN:-0}
 
-TRAIN_LOW_DIR=${TRAIN_LOW_DIR:-datasets/LOLdataset/our485/low}
-EVAL_LOW_DIR=${EVAL_LOW_DIR:-datasets/LOLdataset/eval15/low}
-EVAL_HIGH_DIR=${EVAL_HIGH_DIR:-datasets/LOLdataset/eval15/high}
+LOL_ROOT=${LOL_ROOT:-datasets/LOLdataset}
+TRAIN_ROOT=${TRAIN_ROOT:-$LOL_ROOT/our485}
+EVAL_ROOT=${EVAL_ROOT:-$LOL_ROOT/eval15}
+TRAIN_LOW_DIR=${TRAIN_LOW_DIR:-$TRAIN_ROOT/low}
+EVAL_LOW_DIR=${EVAL_LOW_DIR:-$EVAL_ROOT/low}
+EVAL_HIGH_DIR=${EVAL_HIGH_DIR:-$EVAL_ROOT/high}
 
 LABEL_ROOT=${LABEL_ROOT:-output/rebuttal_prior_ablation_lolv1/labels}
 SAVE_ROOT=${SAVE_ROOT:-weights/rebuttal_prior_ablation_lolv1}
@@ -52,6 +60,13 @@ SAM2_TRAIN_LABEL_DIR=${SAM2_TRAIN_LABEL_DIR:-/home/zqh/code/sam2/notebooks/runs/
 SAM2_EVAL_LABEL_DIR=${SAM2_EVAL_LABEL_DIR:-$LABEL_ROOT/eval/sam2/label_uint8}
 SAM2_ROOT=${SAM2_ROOT:-/home/zqh/code/sam2}
 SAM2_CKPT=${SAM2_CKPT:-$SAM2_ROOT/checkpoints/sam2.1_hiera_base_plus.pt}
+SAM1_TRAIN_LABEL_DIR=${SAM1_TRAIN_LABEL_DIR:-$LABEL_ROOT/train/sam1/label_uint8}
+SAM1_EVAL_LABEL_DIR=${SAM1_EVAL_LABEL_DIR:-$LABEL_ROOT/eval/sam1/label_uint8}
+SAM1_ROOT=${SAM1_ROOT:-/home/zqh/code/HVI-CIDNet/segment-anything}
+SAM1_CKPT=${SAM1_CKPT:-/home/zqh/code/HVI-CIDNet/weights/sam_vit_h_4b8939.pth}
+SAM1_MODEL_TYPE=${SAM1_MODEL_TYPE:-vit_h}
+# Optional: reuse an existing submitted SAM2 checkpoint instead of retraining SAM2.
+SAM2_EXISTING_CKPT=${SAM2_EXISTING_CKPT:-}
 
 run_cmd() {
   echo "+ $*"
@@ -117,6 +132,34 @@ if contains_variant sam2; then
   fi
 fi
 
+# Optionally generate SAM1 labels as a recognized alternative foundation segmentation prior.
+if contains_variant sam1; then
+  if [[ ! -d "$SAM1_TRAIN_LABEL_DIR" ]]; then
+    if [[ "$RUN_SAM1_TRAIN_GEN" == "1" ]]; then
+      run_cmd "${PY[@]}" tools/prior_ablation/generate_sam1_labels.py \
+        --img_dir "$TRAIN_LOW_DIR" --out_dir "$LABEL_ROOT/train/sam1" \
+        --sam1_root "$SAM1_ROOT" --checkpoint "$SAM1_CKPT" --model_type "$SAM1_MODEL_TYPE" --brighten
+      SAM1_TRAIN_LABEL_DIR="$LABEL_ROOT/train/sam1/label_uint8"
+    else
+      echo "[error] SAM1_TRAIN_LABEL_DIR not found: $SAM1_TRAIN_LABEL_DIR"
+      echo "        Set SAM1_TRAIN_LABEL_DIR=... or RUN_SAM1_TRAIN_GEN=1 with SAM1_ROOT/SAM1_CKPT."
+      exit 2
+    fi
+  fi
+  if [[ ! -d "$SAM1_EVAL_LABEL_DIR" ]]; then
+    if [[ "$RUN_SAM1_EVAL_GEN" == "1" ]]; then
+      run_cmd "${PY[@]}" tools/prior_ablation/generate_sam1_labels.py \
+        --img_dir "$EVAL_LOW_DIR" --out_dir "$LABEL_ROOT/eval/sam1" \
+        --sam1_root "$SAM1_ROOT" --checkpoint "$SAM1_CKPT" --model_type "$SAM1_MODEL_TYPE" --brighten
+      SAM1_EVAL_LABEL_DIR="$LABEL_ROOT/eval/sam1/label_uint8"
+    else
+      echo "[error] SAM1_EVAL_LABEL_DIR not found: $SAM1_EVAL_LABEL_DIR"
+      echo "        Set SAM1_EVAL_LABEL_DIR=... or RUN_SAM1_EVAL_GEN=1 with SAM1_ROOT/SAM1_CKPT."
+      exit 2
+    fi
+  fi
+fi
+
 common_train_args=(
   --dataset lol_v1
   --nEpochs "$EPOCHS"
@@ -124,10 +167,23 @@ common_train_args=(
   --lr 0.0002
   --optim adamw
   --weight_decay 1e-4
+  --beta1 0.9
+  --beta2 0.999
   --batchSize "$BATCH_SIZE"
   --cropSize 256
   --threads "$THREADS"
   --seed "$SEED"
+  --data_train_lol_v1 "$TRAIN_ROOT"
+  --data_val_lol_v1 "$EVAL_LOW_DIR"
+  --data_valgt_lol_v1 "$EVAL_HIGH_DIR"
+  --HVI_weight 1.0
+  --L1_weight 1.0
+  --D_weight 0.5
+  --E_weight 50.0
+  --P_weight 0.01
+  --loss_edge True
+  --loss_rem False
+  --rem_weight 0.1
   --prior_mode attn
   --pre_lca_film True
   --pre_lca_film_scale 0.1
@@ -164,13 +220,17 @@ train_one() {
   local use_prior=True
   case "$variant" in
     sam2) train_label_dir="$SAM2_TRAIN_LABEL_DIR"; eval_label_dir="$SAM2_EVAL_LABEL_DIR" ;;
+    sam1) train_label_dir="$SAM1_TRAIN_LABEL_DIR"; eval_label_dir="$SAM1_EVAL_LABEL_DIR" ;;
     slic|grid|random|random_pixel|single) train_label_dir="$LABEL_ROOT/train/$variant"; eval_label_dir="$LABEL_ROOT/eval/$variant" ;;
     no_prior) use_prior=False ;;
     *) echo "[error] unknown variant: $variant"; exit 2 ;;
   esac
 
   local ckpt="$SAVE_ROOT/$variant/epoch_${EPOCHS}.pth"
-  if [[ -f "$ckpt" && "$FORCE_TRAIN" != "1" ]]; then
+  if [[ "$variant" == "sam2" && -n "$SAM2_EXISTING_CKPT" ]]; then
+    ckpt="$SAM2_EXISTING_CKPT"
+    echo "[use existing sam2] $ckpt"
+  elif [[ -f "$ckpt" && "$FORCE_TRAIN" != "1" ]]; then
     echo "[skip train] $variant checkpoint exists: $ckpt"
   else
     local train_args=("${common_train_args[@]}" --run_name "$variant" --val_folder "$RESULT_ROOT/train_val/$variant/")
